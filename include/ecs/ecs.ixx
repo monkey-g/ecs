@@ -823,14 +823,30 @@ namespace ecs::detail {
 	}
 } // namespace ecs::detail
 
+#if __has_cpp_attribute(assume)
+#define Assume(expression) [[assume((expression))]]
+#else
+#ifdef _MSC_VER
+#define Assume(expression) __assume((expression))
+#elif defined(__clang)
+#define Assume(expression) __builtin_assume((expression))
+#elif defined(GCC)
+#define Assume(expression) __attribute__((assume((expression))))
+#else
+#define Assume(expression) /* unknown */
+#endif
+#endif // __has_cpp_attribute
+
 #define ECS_InvokeContractBreach(expression, message, func)                                                                                \
 	do {                                                                                                                                   \
 		if (!(expression)) {                                                                                                               \
-			if (std::is_constant_evaluated())                                                                                              \
-				std::unreachable();                                                                                                        \
-			else                                                                                                                           \
-				func(#expression, message);                                                        \
+			if (!std::is_constant_evaluated())                                                                                             \
+				func(#expression, message);                                                                                                \
+			/* Contract handler should not let execution reach here */                                                                     \
+			std::unreachable();                                                                                                            \
 		}                                                                                                                                  \
+		/* (expression) is always true from here on out */                                                                                 \
+		Assume(expression);                                                                                                                \
 	} while (false)
 
 #define Assert(expression, message) ECS_InvokeContractBreach(expression, message, ecs::detail::do_assertion_failed)
@@ -850,23 +866,9 @@ namespace ecs::detail {
 
 #else
 
-#if __has_cpp_attribute(assume)
-#define ASSUME(expression) [[assume((expression))]]
-#else
-#ifdef _MSC_VER
-#define ASSUME(expression) __assume((expression))
-#elif defined(__clang)
-#define ASSUME(expression) __builtin_assume((expression))
-#elif defined(GCC)
-#define ASSUME(expression) __attribute__((assume((expression))))
-#else
-#define ASSUME(expression) /* unknown */
-#endif
-#endif // __has_cpp_attribute
-
-#define Assert(expression, message) ASSUME(expression)
-#define Pre(expression, message) ASSUME(expression)
-#define Post(expression, message) ASSUME(expression)
+#define Assert(expression, message) Assume(expression)
+#define Pre(expression, message) Assume(expression)
+#define Post(expression, message) Assume(expression)
 #define AssertAudit(expression, message)
 #define PreAudit(expression, message)
 #define PostAudit(expression, message)

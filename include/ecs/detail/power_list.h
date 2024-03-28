@@ -2,6 +2,7 @@
 #define ECS_DETAIL_GORKING_LIST_H
 
 #include "contract.h"
+#include "scatter_allocator.h"
 #include <algorithm>
 #include <memory>
 #include <queue>
@@ -30,14 +31,13 @@ namespace ecs::detail {
 			std::size_t index{0};
 			std::array<stepper, 32> steppers{};
 
-			constexpr balance_helper(node* n, std::size_t count) : curr(n), log_n(std::bit_width(count-1)) {
+			constexpr balance_helper(node* n, std::size_t count) : curr(n), log_n(std::bit_width(count - 1)) {
 				Pre(std::cmp_less(log_n, steppers.size()), "List is too large, increase array capacity");
 
 				// Load up steppers
 				node* current = n;
-				for (std::size_t i = 0; i < log_n; i++) {
-					std::size_t const step = std::size_t{1} << (log_n - i);
-					steppers[log_n - 1 - i] = {i + step, step, current};
+				for (std::size_t i = 0, step = std::size_t{1} << log_n; i < log_n; i++, step >>= 1) {
+					steppers[i] = {i + step, step, current};
 					current = current->next[0];
 				}
 			}
@@ -132,6 +132,13 @@ namespace ecs::detail {
 		};
 
 		constexpr power_list() = default;
+		constexpr power_list(power_list const&) = delete;
+		constexpr power_list(power_list&& other) {
+			head = std::exchange(other.head, nullptr);
+			count = std::exchange(other.count, 0);
+			needs_rebalance = std::exchange(other.rebalance, false);
+			alloc = std::move(other.alloc);
+		}
 		constexpr power_list(std::ranges::sized_range auto const& range) {
 			if (range.empty())
 				return;
@@ -139,34 +146,35 @@ namespace ecs::detail {
 			Pre(std::ranges::is_sorted(range), "Input range must be sorted");
 
 			count = std::size(range);
+			alloc.allocate_with_callback(count, [&](auto span) {
+				Assert(span.size() == count, "This should be a single allocation");
+				Assert(nullptr == head, "This shouldn't happen");
+				head = span.data();
+			});
+			Post(head != nullptr, "Allocation failed");
 
-			node* curr = nullptr;
-			for (auto val : range) {
-				node* n = new node{{nullptr, nullptr}, val};
-				if (!curr) {
-					root = curr = n;
-				} else {
-					curr->next[0] = n;
-					curr->next[1] = n;
-					curr = n;
-				}
+			for (int i = 0; auto val : range | std::views::take(count - 1)) {
+				std::construct_at(&head[i], node{{&head[i + 1], &head[i + 1]}, val});
+				i += 1;
 			}
+			std::construct_at(&head[count - 1], node{{nullptr, &head[count - 1]}, *--range.end()});
 
 			needs_rebalance = true;
 			rebalance();
 		}
 
 		constexpr ~power_list() {
-			node* n = root;
+			node* n = head;
 			while (n) {
 				node* next = n->next[0];
-				delete n;
+				Assert(n != next, "Node points to itself");
+				std::destroy_at(n);
 				n = next;
 			}
 		}
 
 		constexpr iterator begin() {
-			return {root, static_cast<std::size_t>(needs_rebalance ? count : 0)};
+			return {head, static_cast<std::size_t>(needs_rebalance ? count : 0)};
 		}
 
 		constexpr std::default_sentinel_t end() {
@@ -178,29 +186,35 @@ namespace ecs::detail {
 		}
 
 		constexpr bool empty() const {
-			return nullptr == root;
+			return nullptr == head;
 		}
 
 		constexpr void insert(T val) {
-			if (root == nullptr) {
-				root = new node{{nullptr, nullptr}, val};
-				root->next[1] = root;
-			} else if (val < root->data) {
-				root = new node{{root, root->next[1]}, val};
-			} else if (node* last = root->next[1]; last && val >= last->data) {
-				node* n = new node{{nullptr, nullptr}, val};
+			node* n = alloc.allocate_one();
+			std::construct_at(n, node{{nullptr, nullptr}, val});
+
+			if (head == nullptr) {// empty
+				head = n;
+				head->next[1] = n;
+			} else if (val <= head->data) { // before head
+				n->next[0] = head;
+				n->next[1] = head->next[1];
+				head = n;
+			} else if (node* last = head->next[1]; last && val >= last->data) { // after tail
 				last->next[0] = n;
 				last->next[1] = n;
-				root->next[1] = n;
-			} else {
-				node* prev = root;
-				node* n = root->next[val > root->data];
-				while (val > n->data) {
-					prev = n;
-					n = n->next[val >= n->next[1]->data];
+				head->next[1] = n;
+			} else { // middle
+				node* prev = head;
+				node* curr = head->next[val > head->data];
+				while (val > curr->data) {
+					prev = curr;
+					curr = curr->next[val >= curr->next[1]->data];
 				}
 
-				prev->next[0] = new node{{n, n}, val};
+				prev->next[0] = n;
+				n->next[0] = curr;
+				n->next[1] = curr->next[1];
 			}
 
 			count += 1;
@@ -217,16 +231,21 @@ namespace ecs::detail {
 
 			node* n = it.curr;
 			node* next = n->next[0];
-			delete n;
-			it.prev->next[0] = next;
-
+			alloc.deallocate({n, 1});
+			if (it.prev == nullptr) // head
+				head = next;
+			else {
+				if (next == nullptr) // tail
+					head->next[1] = it.prev;
+				it.prev->next[0] = next;
+			}
 			count -= 1;
 			needs_rebalance = true;
 		}
 
 		constexpr void rebalance() {
-			if (root && needs_rebalance) {
-				balance_helper bh(root, count);
+			if (head && needs_rebalance) {
+				balance_helper bh(head, count);
 				while (bh)
 					bh.balance_current_and_advance();
 			}
@@ -240,14 +259,18 @@ namespace ecs::detail {
 
 	private:
 		constexpr struct iterator find_prev(T const& val) const {
-			if (root == nullptr || val < root->data || val > root->next[1]->data)
+			if (head == nullptr || val < head->data || val > head->next[1]->data)
 				return {};
 
 			node* prev = nullptr;
-			node* n = root;
-			while (val > n->data) {
+			node* n = head;
+			while (n->next[0] && val >= n->next[0]->data) {
 				prev = n;
-				n = n->next[val >= n->next[1]->data];
+				n = n->next[val > n->next[1]->data];
+			}
+			while (n->data < val) {
+				prev = n;
+				n = n->next[0];
 			}
 
 			if (n->data == val)
@@ -256,14 +279,17 @@ namespace ecs::detail {
 				return {};
 		}
 
-		node* root = nullptr;
+		node* head = nullptr;
 		std::size_t count : 63 = 0;
 		std::size_t needs_rebalance : 1 = false;
+		scatter_allocator<node> alloc;
 	};
 
-	// UNIT TESTS
+// UNIT TESTS
+#if 1
 	static_assert(
 		[] {
+			Assert(true, "");
 			power_list<int> list;
 			list.remove(123);
 			return list.empty() && list.size() == 0 && !list.contains(0);
@@ -282,16 +308,93 @@ namespace ecs::detail {
 
 	static_assert(
 		[] {
-			auto const iota = std::views::iota(-2, 2);
 			power_list<int> list;
-			for (int v : iota)
-				list.insert(v);
-			for (int v : iota)
+			list.insert(23);
+			return list.contains(23);
+		}(),
+		"Insert empty");
+
+	static_assert(
+		[] {
+			power_list<int> list;
+			list.insert(23);
+			list.insert(22);
+			return list.contains(23);
+		}(),
+		"Insert before head");
+
+	static_assert(
+		[] {
+			power_list<int> list;
+			list.insert(23);
+			list.insert(24);
+			return list.contains(23);
+		}(),
+		"Insert after tail");
+
+	static_assert(
+		[] {
+			power_list<int> list;
+			list.insert(22);
+			list.insert(24);
+
+			list.insert(23);
+			return list.contains(23);
+		}(),
+		"Insert in middle");
+
+	static_assert(
+		[] {
+			power_list<int> list;
+			list.insert(23);
+			list.remove(23);
+			list.insert(24);
+			return !list.contains(23) && list.contains(24);
+		}(),
+		"Insert/Remove/Insert");
+
+	static_assert(
+		[] {
+			power_list<int> list;
+			list.remove(23);
+			return list.empty();
+		}(),
+		"Remove from empty");
+
+	static_assert(
+		[] {
+			power_list<int> list(std::views::iota(0, 8));
+			list.remove(0);
+			for (int v : std::views::iota(1, 8))
 				if (!list.contains(v))
 					return false;
-			return true;
+			return 7 == list.size();
 		}(),
-		"Insert");
+		"Remove head");
+
+	static_assert(
+		[] {
+			power_list<int> list(std::views::iota(0, 8));
+			list.remove(7);
+			for (int v : std::views::iota(0, 7))
+				Assert(list.contains(v), "missing value");
+			;
+			return 7 == list.size();
+		}(),
+		"Remove tail");
+
+	static_assert(
+		[] {
+			power_list<int> list(std::views::iota(0, 8));
+			for (int v : std::views::iota(1, 7))
+				list.remove(v);
+			int items = 0;
+			for (int v : std::views::iota(0, 8))
+				items += list.contains(v);
+			Post(items == 2, "Items missing from list");
+			return 2 == list.size();
+		}(),
+		"Remove middle");
 
 	static_assert(
 		[] {
@@ -306,15 +409,17 @@ namespace ecs::detail {
 
 	static_assert(
 		[] {
-			auto const iota = std::views::iota(-200, 200);
+			auto const iota = std::views::iota(-100, 200);
 			power_list<int> list;
 			for (int v : iota)
 				list.insert(v);
+			int sum = 0;
 			for (int v : list)
-				v += 0;
-			return list.contains(1);
+				sum += v;
+			return sum > 0 && list.contains(1);
 		}(),
 		"Implicit rebalance");
+#endif
 } // namespace ecs::detail
 
 #endif // !ECS_DETAIL_GORKING_LIST_H

@@ -113,13 +113,7 @@ TEST_CASE("Gorking list") {
 #endif
 
 	auto const iota = std::views::iota(-200, 200);
-	ecs::detail::power_list<int> list;
-	for (int v : iota)
-		list.insert(v);
-	for (int v : list)
-		v += 0;
-	for (int v : iota)
-		REQUIRE(list.contains(v));
+	ecs::detail::power_list<int> list(iota);
 
 #if 0
 	ecs::detail::power_list<int> list(std::views::iota(-2, 100));

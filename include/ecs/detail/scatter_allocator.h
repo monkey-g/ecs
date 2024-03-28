@@ -10,18 +10,25 @@ namespace ecs::detail {
 	template <typename Fn, typename T>
 	concept callback_takes_a_span = std::invocable<Fn, std::span<T>>;
 
-	// the 'Array Scatter Allocator'.
+	// the 'Scatter Allocator'.
 	// * A single allocation can result in many addresses being returned, as the
 	//   allocator fills in holes in the internal pools of memory.
-	// * It is *not* thread safe. Checks for invalid access in debug builds.
+	// * It is *not* thread safe.
 	// * Deallocated memory is reused before new memory is taken from pools.
 	//   This way old pools will be filled with new data before newer pools are tapped.
 	//   Filling it 'from the back' like this should keep fragmentation down.
-	template <typename T, int DefaultStartingSize = 16>
-	struct array_scatter_allocator {
+	template <typename T, std::size_t DefaultStartingSize = 16>
+	struct scatter_allocator {
 		static_assert(DefaultStartingSize > 0);
 
-		constexpr std::vector<std::span<T>> allocate(int const count) {
+		constexpr scatter_allocator() noexcept = default;
+		constexpr scatter_allocator(scatter_allocator const&) noexcept = delete;
+		constexpr scatter_allocator(scatter_allocator&& other) noexcept {
+			pools.swap(other.pools);
+			free_list.swap(other.free_list);
+		}
+
+		constexpr std::vector<std::span<T>> allocate(std::size_t const count) {
 			std::vector<std::span<T>> r;
 			allocate_with_callback(count, [&r](std::span<T> s) {
 				r.push_back(s);
@@ -29,18 +36,24 @@ namespace ecs::detail {
 			return r;
 		}
 
-		constexpr void allocate_with_callback(int const count, callback_takes_a_span<T> auto&& alloc_callback) {
-			#ifdef _DEBUG
-			if (!std::is_constant_evaluated())
-				Assert(active_threads_access_count++ == 0, "Re-entrant access, or more than one thread is accessing this allocator at the same time!");
-			#endif
-			int remaining_count = count;
+		constexpr T* allocate_one() {
+			T* t{};
+			allocate_with_callback(1, [&t](std::span<T> s) {
+				Assert(t == nullptr, "Something has gone terribly wrong");
+				Assert(s.size() == 1, "Something has gone terribly wrong");
+				t = s.data();
+			});
+			return t;
+		}
+
+		constexpr void allocate_with_callback(std::size_t const count, callback_takes_a_span<T> auto&& alloc_callback) {
+			std::size_t remaining_count = count;
 
 			// Take space from free list
 			std::unique_ptr<free_block>* ptr_free = &free_list;
 			while (*ptr_free) {
 				free_block* ptr = ptr_free->get();
-				int const min_space = std::min(remaining_count, (int)(ptr->span.size()));
+				std::size_t const min_space = std::min(remaining_count, ptr->span.size());
 				if (min_space == 0) {
 					ptr_free = &ptr->next;
 					continue;
@@ -65,13 +78,15 @@ namespace ecs::detail {
 			// Take space from pools
 			pool* ptr_pool = pools.get();
 			while (remaining_count > 0) {
-				if (ptr_pool == nullptr)
-					ptr_pool = add_pool(pools ? pools->capacity << 1 : DefaultStartingSize);
+				if (ptr_pool == nullptr) {
+					auto const next_pow2_size = std::size_t{1} << std::bit_width(remaining_count);
+					ptr_pool = add_pool(pools ? pools->capacity << 1 : std::max(next_pow2_size, DefaultStartingSize));
+				}
 
 				pool& p = *ptr_pool;
 				ptr_pool = ptr_pool->next.get();
 
-				unsigned const min_space = std::min({remaining_count, (p.capacity - p.next_available)});
+				std::size_t const min_space = std::min({remaining_count, (p.capacity - p.next_available)});
 				if (min_space == 0)
 					continue;
 
@@ -81,27 +96,15 @@ namespace ecs::detail {
 				p.next_available += min_space;
 				remaining_count -= min_space;
 			}
-#ifdef _DEBUG
-			if (!std::is_constant_evaluated())
-				active_threads_access_count--;
-#endif
 		}
 
 		constexpr void deallocate(std::span<T> const span) {
-#ifdef _DEBUG
-			if (!std::is_constant_evaluated())
-				Assert(active_threads_access_count++ == 0, "More than one thread is accessing this allocator at the same time!");
-#endif
 			PreAudit(validate_addr(span), "Invalid address passed to deallocate()");
 			free_list = std::make_unique<free_block>(std::move(free_list), span);
-#ifdef _DEBUG
-			if (!std::is_constant_evaluated())
-				active_threads_access_count--;
-#endif
 		}
 
 	private:
-		constexpr auto* add_pool(int const size) {
+		constexpr auto* add_pool(std::size_t const size) {
 			pools = std::make_unique<pool>(std::move(pools), std::make_unique_for_overwrite<T[]>(size), 0, size);
 			return pools.get();
 		}
@@ -129,22 +132,19 @@ namespace ecs::detail {
 		struct pool {
 			std::unique_ptr<pool> next;
 			std::unique_ptr<T[]> base;
-			int next_available;
-			int capacity;
+			std::size_t next_available;
+			std::size_t capacity;
 		};
 
 		std::unique_ptr<pool> pools;
 		std::unique_ptr<free_block> free_list;
-		#ifdef _DEBUG
-		std::atomic_int active_threads_access_count = 0;
-		#endif
 	};
 
 	// UNIT TESTS
 	static_assert(
 		[] {
 			constexpr std::size_t elems_to_alloc = 123;
-			array_scatter_allocator<int> alloc;
+			scatter_allocator<int> alloc;
 			std::size_t total_alloc = 0;
 			alloc.allocate_with_callback(elems_to_alloc, [&](std::span<int> s) {
 				total_alloc += s.size();
@@ -155,7 +155,7 @@ namespace ecs::detail {
 
 	static_assert(
 		[] {
-			array_scatter_allocator<int> alloc;
+			scatter_allocator<int> alloc;
 			std::vector<std::span<int>> r = alloc.allocate(10);
 			auto const subspan = r[0].subspan(3, 4);
 			alloc.deallocate(subspan);
@@ -165,7 +165,7 @@ namespace ecs::detail {
 
 	static_assert(
 		[] {
-			array_scatter_allocator<int, 16> alloc;
+			scatter_allocator<int, 16> alloc;
 			auto vec = alloc.allocate(10);
 			alloc.deallocate(vec[0].subspan(2, 2));
 			alloc.deallocate(vec[0].subspan(4, 2));

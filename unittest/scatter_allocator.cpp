@@ -1,10 +1,10 @@
 #include <catch2/catch_test_macros.hpp>
-#include <ecs/detail/array_scatter_allocator.h>
+#include <ecs/detail/scatter_allocator.h>
 
-using ecs::detail::array_scatter_allocator;
+using ecs::detail::scatter_allocator;
 
-TEST_CASE("Array-scatter allocator") {
-	array_scatter_allocator<int, 16> alloc;
+TEST_CASE("Scatter allocator") {
+	scatter_allocator<int, 16> alloc;
 	auto vec = alloc.allocate(10);
 	alloc.deallocate(vec[0].subspan(2, 2));
 	alloc.deallocate(vec[0].subspan(4, 2));

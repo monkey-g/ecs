@@ -53,21 +53,21 @@ ECS_EXPORT namespace ecs {
 namespace ecs::detail {
 	template <typename... DummyArgs>
 		requires(sizeof...(DummyArgs) == 0)
-	inline void do_assertion_failed(char const* what, char const* how) {
+	[[noreturn]] inline void do_assertion_failed(char const* what, char const* how) {
 		ecs::detail::contract_violation_interface auto& cvi = ecs::contract_violation_handler<DummyArgs...>;
 		cvi.assertion_failed(what, how);
 	}
 
 	template <typename... DummyArgs>
 		requires(sizeof...(DummyArgs) == 0)
-	inline void do_precondition_violation(char const* what, char const* how) {
+	[[noreturn]] inline void do_precondition_violation(char const* what, char const* how) {
 		ecs::detail::contract_violation_interface auto& cvi = ecs::contract_violation_handler<DummyArgs...>;
 		cvi.precondition_violation(what, how);
 	}
 
 	template <typename... DummyArgs>
 		requires(sizeof...(DummyArgs) == 0)
-	inline void do_postcondition_violation(char const* what, char const* how) {
+	[[noreturn]] inline void do_postcondition_violation(char const* what, char const* how) {
 		ecs::detail::contract_violation_interface auto& cvi = ecs::contract_violation_handler<DummyArgs...>;
 		cvi.postcondition_violation(what, how);
 	}

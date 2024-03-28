@@ -3,6 +3,7 @@
 
 #include "contract.h"
 #include <algorithm>
+#include <vector>
 #include <memory>
 #include <span>
 
@@ -66,7 +67,7 @@ namespace ecs::detail {
 				if (remaining_count == 0)
 					return;
 
-				if (min_space == (int)ptr->span.size()) {
+				if (min_space == ptr->span.size()) {
 					auto next = std::move(ptr->next);
 					*ptr_free = std::move(next);
 				} else {

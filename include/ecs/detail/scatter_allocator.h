@@ -28,6 +28,12 @@ namespace ecs::detail {
 			pools.swap(other.pools);
 			free_list.swap(other.free_list);
 		}
+		constexpr scatter_allocator& operator=(scatter_allocator const&) = delete;
+		constexpr scatter_allocator& operator =(scatter_allocator && other) {
+			pools.swap(other.pools);
+			free_list.swap(other.free_list);
+			return *this;
+		}
 
 		constexpr std::vector<std::span<T>> allocate(std::size_t const count) {
 			std::vector<std::span<T>> r;

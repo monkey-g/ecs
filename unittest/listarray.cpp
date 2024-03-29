@@ -36,47 +36,53 @@ int search(node* n, int val) {
 }
 
 TEST_CASE("Gorking list") {
-	constexpr int N = 64;
-	int constexpr log_n = std::bit_width((unsigned)N-1);
+	constexpr int N = 37;
+	int constexpr log_n = std::bit_width((unsigned)N - 1);
 
 	std::array<node, N> nodes{};
 
 	// Init linked list
 	for (int i = 0; i < N - 1; i += 1) {
 		node* const next = &nodes[i + 1];
-		nodes[i] = {{next, next}, i};
+		nodes[i] = {{next, nullptr}, i};
 	}
 	nodes[N - 1] = {{nullptr, &nodes[N - 1]}, N - 1};
 
 	// Load up steppers
 	node* current = &nodes[0];
-	stepper stack[32];
+	stepper steppers[32];
 	for (int i = 0; i < log_n; i++) {
-		int const step = 1 << (log_n - i);
-		stack[log_n - 1 - i] = {i + step, step, current};
+		int const step = (N >> i);
+		int const next_step = step;
+		steppers[log_n - 1 - i] = {next_step, step, current};
 		current = current->next[0];
 	}
-	// std::make_heap(stack, stack + log_n);
+	// std::make_heap(steppers, steppers + log_n);
 
 	// Rebuild the jump points in O(n log log n) time
 	int i = 0;
 	current = &nodes[0];
-	stepper* min_step = &stack[log_n - 1];
-	while (current->next[0] != nullptr) {
-		while (stack[0].target == i) {
-			std::pop_heap(stack, stack + log_n);
-			min_step->from->next[1] = current->next[0];
-			min_step->from = current;
-			min_step->target = i + min_step->size;
-			std::push_heap(stack, stack + log_n);
+	stepper* last_stepper = &steppers[log_n - 1];
+	while (i < N - 1) {
+		while (steppers[0].target == i) {
+			std::pop_heap(steppers, steppers + log_n);
+			if (nullptr == last_stepper->from->next[1] || last_stepper->from->data < current->data)
+				last_stepper->from->next[1] = current;
+			last_stepper->target = i + last_stepper->size;
+			last_stepper->from = current;
+			std::push_heap(steppers, steppers + log_n);
 		}
 
 		i += 1;
 		current = current->next[0];
 	}
-	for (i = 0; i < log_n; i++) {
-		stack[i].from->next[1] = current;
+	while (steppers[0].target == N - 1) {
+		std::pop_heap(steppers, last_stepper + 1);
+		if (!last_stepper->from->next[1])
+			last_stepper->from->next[1] = last_stepper->from->next[0];
+		last_stepper -= 1;
 	}
+	nodes[0].next[1] = current;
 
 #if 1
 	for (node& n : nodes) {
@@ -84,15 +90,7 @@ TEST_CASE("Gorking list") {
 		if (n.next[1] != nullptr) {
 			auto const dist = std::distance(&nodes[n.data], n.next[1]);
 			std::cout << "\t -> " << (n.data + dist);
-			//std::cout << "  distance: " << dist;
-
-			if (dist > 1) {
-				int ix = std::bit_width(unsigned(dist - 2));
-				std::cout << "\t  pow2: " << (1 << ix);
-
-				int const next_pow2 = 1 << std::bit_width(unsigned((ix | (ix - 1)) + 1));
-				std::cout << "\t  next pow2: " << (next_pow2);
-			}
+			 std::cout << "  distance: " << dist;
 		}
 		std::cout << '\n';
 	}
@@ -102,7 +100,7 @@ TEST_CASE("Gorking list") {
 	int total_steps = 0;
 	int max_steps = 0;
 	for (node& n : nodes) {
-		std::cout << "search '" << n.data << "' : \t";
+		std::cout << "search \t'" << n.data << "' : \t";
 		int steps = search(root, n.data);
 		total_steps += steps;
 		max_steps = std::max(max_steps, steps);
@@ -143,7 +141,6 @@ TEST_CASE("Gorking list") {
 
 #endif
 }
-
 
 #include <bit>
 #include <cassert>

@@ -3,7 +3,7 @@
 
 #include "contract.h"
 #include "scatter_allocator.h"
-#include <algorithm>
+//#include <algorithm>
 #include <memory>
 #include <queue>
 #include <ranges>
@@ -27,16 +27,17 @@ namespace ecs::detail {
 			};
 
 			node* curr{};
+			std::size_t count{};
 			std::size_t log_n{};
 			std::size_t index{0};
 			std::array<stepper, 32> steppers{};
 
-			constexpr balance_helper(node* n, std::size_t count) : curr(n), log_n(std::bit_width(count - 1)) {
+			constexpr balance_helper(node* const n, std::size_t count) : curr(n), count(count), log_n(std::bit_width(count - 1)) {
 				Pre(std::cmp_less(log_n, steppers.size()), "List is too large, increase array capacity");
 
 				// Load up steppers
 				node* current = n;
-				for (std::size_t i = 0, step = std::size_t{1} << log_n; i < log_n; i++, step >>= 1) {
+				for (std::size_t i = 0, step = count; i < log_n; i++, step >>= 1) {
 					steppers[i] = {i + step, step, current};
 					current = current->next[0];
 				}
@@ -45,6 +46,9 @@ namespace ecs::detail {
 				while (*this)
 					balance_current_and_advance();
 
+				// TODO! Instead of just pointing to the last element, which
+				//       will make deletions, drop them down a power,
+				//       eg. 32 drops to 16+1
 				for (std::size_t i = 0; i < log_n; i++)
 					steppers[i].from->next[1] = curr;
 			}
@@ -79,14 +83,41 @@ namespace ecs::detail {
 			using iterator_category = std::forward_iterator_tag;
 
 			constexpr iterator() noexcept = default;
-			constexpr iterator(node* n, std::size_t count) : curr(n) {
-				if (count > 0)
+			constexpr iterator(iterator const& other) noexcept {
+				curr = other.curr;
+				prev = other.prev;
+				helper = other.helper ? new balance_helper(other.helper->curr, other.helper->count) : nullptr;
+			}
+			constexpr iterator(iterator&& other) : curr(other.curr), prev(other.prev), helper(std::exchange(other.helper, nullptr)) {}
+			constexpr iterator(node *const n, std::size_t count) : curr(n) {
+				if (count > 0) // ? TODO > 16
 					helper = new balance_helper(n, count);
 			}
 			constexpr iterator(node* curr, node* prev) : curr(curr), prev(prev) {}
 			constexpr ~iterator() {
-				if (helper)
-					delete helper;
+				delete helper;
+			}
+
+			constexpr iterator& operator=(iterator const& other) {
+				curr = other.curr;
+				prev = other.prev;
+				helper = other.helper ? new balance_helper(other.helper->curr, other.helper->count) : nullptr;
+			}
+
+			constexpr iterator& operator=(iterator&& other) {
+				curr = other.curr;
+				prev = other.prev;
+				delete helper;
+				helper = std::exchange(other.helper, nullptr);
+				return *this;
+			}
+
+			constexpr std::strong_ordering operator<=>(iterator const& other) const {
+				if (curr && !other.curr)
+					return std::strong_ordering::less;
+				if (!curr && other.curr)
+					return std::strong_ordering::greater;
+				return curr->data <=> other.curr->data;
 			}
 
 			constexpr iterator& operator++() {
@@ -125,6 +156,11 @@ namespace ecs::detail {
 				return curr->data;
 			}
 
+			constexpr pointer operator->() const {
+				Pre(curr != nullptr, "Dereferencing null");
+				return &curr->data;
+			}
+
 		private:
 			node* curr{};
 			node* prev{};
@@ -132,18 +168,70 @@ namespace ecs::detail {
 		};
 
 		constexpr power_list() = default;
-		constexpr power_list(power_list const&) = delete;
+
+		constexpr power_list(power_list const& other) {
+			assign_range(other);
+		}
+
 		constexpr power_list(power_list&& other) {
 			head = std::exchange(other.head, nullptr);
 			count = std::exchange(other.count, 0);
-			needs_rebalance = std::exchange(other.rebalance, false);
+			needs_rebalance = std::exchange(other.needs_rebalance, false);
 			alloc = std::move(other.alloc);
 		}
+
 		constexpr power_list(std::ranges::sized_range auto const& range) {
+			assign_range(range);
+		}
+
+		constexpr ~power_list() {
+			destroy_nodes();
+		}
+
+		constexpr iterator begin() {
+			return {head, static_cast<std::size_t>(needs_rebalance ? count : 0)};
+		}
+		constexpr iterator begin() const {
+			return {head, std::size_t{0}};
+		}
+
+		constexpr std::default_sentinel_t end() { return {}; }
+		constexpr std::default_sentinel_t end() const { return {}; }
+
+		constexpr std::size_t size() const {
+			return count;
+		}
+
+		constexpr T front(this auto&&) {
+			Pre(!empty(), "Can not call 'front()' on an empty list");
+			return head->data;
+		}
+
+		constexpr T back(this auto&&) {
+			Pre(!empty(), "Can not call 'back()' on an empty list");
+			return head->next[1] ? head->next[1]->data : head->data;
+		}
+
+		[[nodiscard]]
+		constexpr bool empty() const {
+			return nullptr == head;
+		}
+
+		constexpr void clear() {
+			destroy_nodes();
+			alloc = scatter_allocator<node>{};
+			head = nullptr;
+			count = 0;
+			needs_rebalance = false;
+		}
+
+		constexpr void assign_range(std::ranges::sized_range auto const& range) {
+			Pre(std::ranges::is_sorted(range), "Input range must be sorted");
 			if (range.empty())
 				return;
 
-			Pre(std::ranges::is_sorted(range), "Input range must be sorted");
+			if (!empty())
+				clear();
 
 			count = std::size(range);
 			alloc.allocate_with_callback(count, [&](auto span) {
@@ -153,76 +241,54 @@ namespace ecs::detail {
 			});
 			Post(head != nullptr, "Allocation failed");
 
-			for (int i = 0; auto val : range | std::views::take(count - 1)) {
+			iterator it_rebalance;
+			auto const logN = (int)std::bit_width(count); // why is this unsigned in libstdc++?
+			for (int i = 0; auto val : range) {
 				std::construct_at(&head[i], node{{&head[i + 1], &head[i + 1]}, val});
+
 				i += 1;
+
+				if (i == logN) {
+					// The rebalancer needs logN nodes before it can start.
+					it_rebalance = iterator{head, count};
+				} else if (i > logN) {
+					++it_rebalance;
+				}
 			}
-			std::construct_at(&head[count - 1], node{{nullptr, &head[count - 1]}, *--range.end()});
-
-			needs_rebalance = true;
-			rebalance();
-		}
-
-		constexpr ~power_list() {
-			node* n = head;
-			while (n) {
-				node* next = n->next[0];
-				Assert(n != next, "Node points to itself");
-				std::destroy_at(n);
-				n = next;
-			}
-		}
-
-		constexpr iterator begin() {
-			return {head, static_cast<std::size_t>(needs_rebalance ? count : 0)};
-		}
-
-		constexpr std::default_sentinel_t end() {
-			return {};
-		}
-
-		constexpr std::size_t size() const {
-			return count;
-		}
-
-		constexpr bool empty() const {
-			return nullptr == head;
+			head[count - 1].next[0] = nullptr;
 		}
 
 		constexpr void insert(T val) {
 			node* n = alloc.allocate_one();
 			std::construct_at(n, node{{nullptr, nullptr}, val});
 
-			if (head == nullptr) {// empty
+			if (head == nullptr) { // empty
 				head = n;
 				head->next[1] = n;
-			} else if (val <= head->data) { // before head
+			} else if (val < head->data) { // before head
 				n->next[0] = head;
 				n->next[1] = head->next[1];
 				head = n;
-			} else if (node* last = head->next[1]; last && val >= last->data) { // after tail
+			} else if (node* last = head->next[1]; last && (last->data < val)) { // after tail
 				last->next[0] = n;
 				last->next[1] = n;
 				head->next[1] = n;
 			} else { // middle
-				node* prev = head;
-				node* curr = head->next[val > head->data];
-				while (val > curr->data) {
-					prev = curr;
-					curr = curr->next[val >= curr->next[1]->data];
-				}
-
-				prev->next[0] = n;
-				n->next[0] = curr;
-				n->next[1] = curr->next[1];
+				iterator it = lower_bound(val);
+				it.prev->next[0] = n;
+				n->next[0] = it.curr;
+				n->next[1] = it.curr->next[1];
 			}
 
 			count += 1;
 			needs_rebalance = true;
 		}
 
+		constexpr void insert_after(iterator pos, T val) {
+		}
+
 		constexpr void remove(T val) {
-			erase(find_prev(val));
+			erase(find(val));
 		}
 
 		constexpr void erase(iterator it) {
@@ -253,22 +319,21 @@ namespace ecs::detail {
 			needs_rebalance = false;
 		}
 
-		constexpr bool contains(T const& val) const {
-			return find_prev(val);
-		}
-
-	private:
-		constexpr struct iterator find_prev(T const& val) const {
+		constexpr struct iterator find(T const& val) const {
 			if (head == nullptr || val < head->data || val > head->next[1]->data)
 				return {};
 
 			node* prev = nullptr;
 			node* n = head;
-			while (n->next[0] && val >= n->next[0]->data) {
+			while (n->next[0] && val > n->next[0]->data) {
 				prev = n;
 				n = n->next[val > n->next[1]->data];
 			}
 			while (n->data < val) {
+				// The only node in the list that can have 'next[0] == nullptr' is
+				// the last node in the list. It would have been reached in the above loop.
+				Assert(n->next[0] != nullptr, "This should not be possible, by design");
+
 				prev = n;
 				n = n->next[0];
 			}
@@ -279,13 +344,47 @@ namespace ecs::detail {
 				return {};
 		}
 
+		constexpr iterator lower_bound(T const& val) const {
+			if (empty())
+				return {};
+			if (val < head->data)
+				return {head, nullptr};
+			//if (val > head->next[1]->data)
+			//	return {head->next[1]};
+
+			node* prev = head;
+			node* curr = head->next[val > head->data];
+			Assert(curr != nullptr, "invalid node found");
+			while (val > curr->data) {
+				prev = curr;
+				curr = curr->next[val > curr->next[1]->data];
+			}
+			return {curr, prev};
+		}
+
+		constexpr bool contains(T const& val) const {
+			return find(val);
+		}
+
+	private:
+		constexpr void destroy_nodes() {
+			node* n = head;
+			while (n) {
+				node* next = n->next[0];
+				Assert(n != next, "Node points to itself");
+				std::destroy_at(n);
+				n = next;
+			}
+		}
+
 		node* head = nullptr;
 		std::size_t count : 63 = 0;
 		std::size_t needs_rebalance : 1 = false;
 		scatter_allocator<node> alloc;
 	};
+	static_assert(std::ranges::sized_range<power_list<int>>);
 
-// UNIT TESTS
+	// UNIT TESTS
 #if 1
 	static_assert(
 		[] {
@@ -305,6 +404,15 @@ namespace ecs::detail {
 			return true;
 		}(),
 		"Construction from a range");
+
+	static_assert(
+		[] {
+			auto const iota = std::views::iota(-2, 2);
+			power_list<int> list(iota);
+			power_list<int> list2(list);
+			return true;
+		}(),
+		"Copy construction");
 
 	static_assert(
 		[] {
@@ -352,6 +460,18 @@ namespace ecs::detail {
 			return !list.contains(23) && list.contains(24);
 		}(),
 		"Insert/Remove/Insert");
+
+	static_assert(
+		[] {
+			power_list<int> list(std::views::iota(-2, 2));
+			list.assign_range(std::views::iota(0, 4));
+			list.assign_range(std::views::iota(4, 8));
+			Assert(list.size() == 4, "Invalid element count in list");
+			for (int v : std::views::iota(4, 8))
+				Assert(list.contains(v), "Value not found");
+			return true;
+		}(),
+		"Assign from a range");
 
 	static_assert(
 		[] {

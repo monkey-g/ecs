@@ -51,13 +51,13 @@ TEST_CASE("Gorking list") {
 	// Load up steppers
 	node* current = &nodes[0];
 	stepper steppers[32];
-	for (int i = 0; i < log_n; i++) {
-		int const step = (N >> i);
-		int const next_step = step;
-		steppers[log_n - 1 - i] = {next_step, step, current};
+	for (int i = 0, step = 1<<(log_n-1); i < log_n; i++, step >>= 1) {
+		//int const step = (N >> i);
+		int const next_step = std::min(N-1, step);
+		steppers[log_n-1-i] = {i + next_step, step, current};
 		current = current->next[0];
 	}
-	// std::make_heap(steppers, steppers + log_n);
+	// std::make_heap(steppers, steppers + log_n); // not needed
 
 	// Rebuild the jump points in O(n log log n) time
 	int i = 0;

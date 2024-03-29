@@ -1737,11 +1737,8 @@ private:
 
 		// The data for the full range of the chunk
 		T* data;
-
-		// Skip list stuff
-		std::array<chunk*, 2> next;
 	};
-	static_assert(sizeof(chunk) == 32);
+	static_assert(sizeof(chunk) == 16);
 
 	//
 	struct entity_empty {
@@ -1770,9 +1767,9 @@ private:
 	using chunk_iter = typename std::vector<chunk>::iterator;
 	using chunk_const_iter = typename std::vector<chunk>::const_iterator;
 
-	array_scatter_allocator<T> as_alloc;
+	array_scatter_allocator<T> data_alloc;
 	array_scatter_allocator<chunk> chunk_alloc;
-	std::vector<chunk> chunks;
+	power_list<chunk> chunks;
 	std::vector<component_pool_base*> variants;
 
 	// Status flags

@@ -36,7 +36,7 @@ int search(node* n, int val) {
 }
 
 TEST_CASE("Gorking list") {
-	constexpr int N = 37;
+	constexpr int N = 1234;
 	int constexpr log_n = std::bit_width((unsigned)N - 1);
 
 	std::array<node, N> nodes{};
@@ -57,6 +57,7 @@ TEST_CASE("Gorking list") {
 		steppers[log_n-1-i] = {i + next_step, step, current};
 		current = current->next[0];
 	}
+	Assert(std::is_heap(steppers, steppers + log_n), "fix it");
 	// std::make_heap(steppers, steppers + log_n); // not needed
 
 	// Rebuild the jump points in O(n log log n) time
@@ -67,7 +68,7 @@ TEST_CASE("Gorking list") {
 		while (steppers[0].target == i) {
 			std::pop_heap(steppers, steppers + log_n);
 			if (nullptr == last_stepper->from->next[1] || last_stepper->from->data < current->data)
-				last_stepper->from->next[1] = current;
+				last_stepper->from->next[1] = current->next[0];
 			last_stepper->target = i + last_stepper->size;
 			last_stepper->from = current;
 			std::push_heap(steppers, steppers + log_n);

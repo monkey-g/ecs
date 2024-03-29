@@ -804,21 +804,21 @@ ECS_EXPORT namespace ecs {
 namespace ecs::detail {
 	template <typename... DummyArgs>
 		requires(sizeof...(DummyArgs) == 0)
-	inline void do_assertion_failed(char const* what, char const* how) {
+	[[noreturn]] inline void do_assertion_failed(char const* what, char const* how) {
 		ecs::detail::contract_violation_interface auto& cvi = ecs::contract_violation_handler<DummyArgs...>;
 		cvi.assertion_failed(what, how);
 	}
 
 	template <typename... DummyArgs>
 		requires(sizeof...(DummyArgs) == 0)
-	inline void do_precondition_violation(char const* what, char const* how) {
+	[[noreturn]] inline void do_precondition_violation(char const* what, char const* how) {
 		ecs::detail::contract_violation_interface auto& cvi = ecs::contract_violation_handler<DummyArgs...>;
 		cvi.precondition_violation(what, how);
 	}
 
 	template <typename... DummyArgs>
 		requires(sizeof...(DummyArgs) == 0)
-	inline void do_postcondition_violation(char const* what, char const* how) {
+	[[noreturn]] inline void do_postcondition_violation(char const* what, char const* how) {
 		ecs::detail::contract_violation_interface auto& cvi = ecs::contract_violation_handler<DummyArgs...>;
 		cvi.postcondition_violation(what, how);
 	}
@@ -1737,6 +1737,10 @@ private:
 
 		// The data for the full range of the chunk
 		T* data;
+
+		bool operator<(chunk const& other) const {
+			return range < other.range;
+		}
 	};
 	static_assert(sizeof(chunk) == 16);
 
@@ -1764,11 +1768,7 @@ private:
 	using entity_span = std::conditional_t<unbound<T>, entity_empty, entity_span_member>;
 	using entity_gen = std::conditional_t<unbound<T>, entity_empty, entity_gen_member>;
 
-	using chunk_iter = typename std::vector<chunk>::iterator;
-	using chunk_const_iter = typename std::vector<chunk>::const_iterator;
-
-	array_scatter_allocator<T> data_alloc;
-	array_scatter_allocator<chunk> chunk_alloc;
+	scatter_allocator<T> alloc_data;
 	power_list<chunk> chunks;
 	std::vector<component_pool_base*> variants;
 
@@ -1790,8 +1790,7 @@ private:
 public:
 	component_pool() noexcept {
 		if constexpr (global<T>) {
-			chunks.emplace_back(entity_range::all(), entity_range::all(), nullptr, true, false);
-			chunks.front().data = new T[1];
+			chunks.insert({entity_range::all(), new T[1]});
 		}
 	}
 
@@ -1801,7 +1800,8 @@ public:
 	component_pool& operator=(component_pool&&) = delete;
 	~component_pool() noexcept override {
 		if constexpr (global<T>) {
-			delete [] chunks.front().data.pointer();
+			Assert(chunks.size() == 1, "Invalid size of global component pool; should be 1.");
+			delete [] chunks.front().data;
 			chunks.clear();
 		} else {
 			free_all_chunks();
@@ -1894,27 +1894,27 @@ public:
 		if (chunks.empty())
 			return nullptr;
 
-		thread_local std::size_t tls_cached_chunk_index = 0;
-		auto chunk_index = tls_cached_chunk_index;
-		if (chunk_index >= std::size(chunks)) [[unlikely]] {
+		thread_local auto tls_cached_chunk_index = chunks.begin();
+		auto chunk_it = tls_cached_chunk_index;
+		if (chunk_it == chunks.end()) [[unlikely]] {
 			// Happens when component pools are reset
-			chunk_index = 0;
+			chunk_it = chunks.begin();
 		}
 
 		// Try the cached chunk index first. This will load 2 chunks into a cache line
-		if (!chunks[chunk_index].active.contains(id)) {
+		if (!chunk_it->range.contains(id)) {
 			// Wasn't found at cached location, so try looking in next chunk.
 			// This should result in linear walks being very cheap.
-			if ((1+chunk_index) != std::size(chunks) && chunks[1+chunk_index].active.contains(id)) {
-				chunk_index += 1;
-				tls_cached_chunk_index = chunk_index;
+			chunk_it += 1;
+			if (chunk_it != chunks.end() && chunk_it->range.contains(id)) {
+				tls_cached_chunk_index = chunk_it;
 			} else {
 				// The id wasn't found in the cached chunks, so do a binary lookup
-				auto const range_it = find_in_ordered_active_ranges({id, id});
-				if (range_it != chunks.cend() && range_it->active.contains(id)) {
+				auto const range_it = chunks.find({id, id});
+				if (range_it != chunks.end() && range_it->range.contains(id)) {
 					// cache the index
-					chunk_index = static_cast<std::size_t>(ranges_dist(range_it));
-					tls_cached_chunk_index = chunk_index;
+					chunk_it = range_it;
+					tls_cached_chunk_index = chunk_it;
 				} else {
 					return nullptr;
 				}
@@ -1922,8 +1922,8 @@ public:
 		}
 
 		// Do the lookup
-		auto const offset = chunks[chunk_index].range.offset(id);
-		return &chunks[chunk_index].data[offset];
+		auto const offset = chunk_it->range.offset(id);
+		return &chunk_it->data[offset];
 	}
 
 	// Merge all the components queued for addition to the main storage,
@@ -1940,7 +1940,7 @@ public:
 		ptrdiff_t count = 0;
 
 		for (chunk const& c : chunks) {
-			count += c.active.count();
+			count += c.range.count();
 		}
 
 		return count;
@@ -1957,10 +1957,6 @@ public:
 	// Returns the number of chunks in use
 	ptrdiff_t num_chunks() const noexcept {
 		return std::ssize(chunks);
-	}
-
-	chunk_const_iter get_head_chunk() const noexcept {
-		return chunks.begin();
 	}
 
 	// Clears the pools state flags
@@ -1990,11 +1986,11 @@ public:
 	}
 
 	// Returns the pools entities
-	stride_view<sizeof(chunk), entity_range const> get_entities() const noexcept {
+	auto get_entities() const noexcept {
 		if (!chunks.empty())
-			return {&chunks[0].active, chunks.size()};
+			return chunks.begin();
 		else
-			return {};
+			return decltype(chunks.begin()){};
 	}
 
 	// Returns true if an entity has a component in this pool
@@ -2004,16 +2000,16 @@ public:
 
 	// Returns true if an entity range has components in this pool
 	bool has_entity(entity_range range) const noexcept {
-		auto it = find_in_ordered_active_ranges(range);
+		auto it = chunks.lower_bound({range, nullptr});
 		while (it != chunks.end()) {
 			if (it->range.first() > range.last())
 				return false;
 
-			if (it->active.contains(range))
+			if (it->range.contains(range))
 				return true;
 
-			if (it->active.overlaps(range)) {
-				auto const [r, m] = entity_range::remove(range, it->active);
+			if (it->range.overlaps(range)) {
+				auto const [r, m] = entity_range::remove(range, it->range);
 				if (m)
 					return false;
 				range = r;
@@ -2032,11 +2028,11 @@ public:
 
 		// Clear all data
 		free_all_chunks();
+		chunks.clear();
 		deferred_adds.clear();
 		deferred_spans.clear();
 		deferred_gen.clear();
 		deferred_removes.clear();
-		chunks.clear();
 		clear_flags();
 
 		// Save the removal state
@@ -2084,77 +2080,12 @@ private:
 		return true;
 	}
 
-	chunk_iter create_new_chunk(chunk_iter it_loc, entity_range const range, entity_range const active, T* data = nullptr,
-								bool owns_data = true, bool split_data = false) noexcept {
-		Pre(range.contains(active), "active range is not contained in the total range");
-		return chunks.emplace(it_loc, range, active, data, owns_data, split_data);
-	}
-
-	template <typename U>
-	chunk_iter create_new_chunk(chunk_iter loc, typename std::vector<U>::const_iterator const& iter) noexcept {
-		entity_range const r = iter->rng;
-		chunk_iter c = create_new_chunk(loc, r, r);
+	void free_all_chunks() {
 		if constexpr (!unbound<T>) {
-			c->data = alloc.allocate(r.ucount());
-			construct_range_in_chunk(c, r, iter->data);
+			for (chunk const& c : chunks)
+				alloc_data.deallocate({c.data, c.range.count()});
 		}
-
-		return c;
-	}
-
-	void free_chunk_data(chunk_iter c) noexcept {
-		// Check for potential ownership transfer
-		if (c->get_owns_data()) {
-			auto next = std::next(c);
-			if (c->get_has_split_data() && next != chunks.end()) {
-				Assert(c->range == next->range, "ranges must be equal");
-				// transfer ownership
-				next->set_owns_data(true);
-			} else {
-				if constexpr (!unbound<T>) {
-					// Destroy active range
-					std::destroy_n(c->data.pointer(), c->active.ucount());
-
-					// Free entire range
-					alloc.deallocate(c->data.pointer(), c->range.ucount());
-
-					// Debug
-					c->data.clear();
-				}
-			}
-		}
-	}
-
-	[[nodiscard]]
-	chunk_iter free_chunk(chunk_iter c) noexcept {
-		free_chunk_data(c);
-		return remove_range_to_chunk(c);
-	}
-
-	void free_all_chunks() noexcept {
-		if constexpr (!global<T>) {
-			auto chunk_it = chunks.begin();
-			while (chunk_it != chunks.end()) {
-				free_chunk_data(chunk_it);
-				std::advance(chunk_it, 1);
-			}
-			chunks.clear();
-			set_data_removed();
-		}
-	}
-
-	auto find_in_ordered_active_ranges(entity_range const rng) const noexcept {
-		return std::ranges::lower_bound(chunks, rng, std::less{}, &chunk::active);
-	}
-
-	ptrdiff_t ranges_dist(typename std::vector<chunk>::const_iterator it) const noexcept {
-		return std::distance(chunks.begin(), it);
-	}
-
-	// Removes a range and chunk from the map
-	[[nodiscard]]
-	chunk_iter remove_range_to_chunk(chunk_iter it) noexcept {
-		return chunks.erase(it);
+		chunks.clear();
 	}
 
 	// Remove a range from the variants
@@ -2188,78 +2119,6 @@ private:
 		return false;
 	}
 
-	template <typename Data>
-	void construct_range_in_chunk(chunk_iter c, entity_range range, Data const& comp_data) noexcept requires(!unbound<T>) {
-		// Offset into the chunks data
-		auto const ent_offset = c->range.offset(range.first());
-
-		entity_id ent = range.first();
-		for (size_t i = 0; i < range.ucount(); ++i, ++ent) {
-			// Construct from a value or a a span of values
-			if constexpr (std::is_same_v<T, Data>) {
-				std::construct_at(&c->data[ent_offset + i], comp_data);
-			} else if constexpr (std::is_invocable_v<Data, entity_id>) {
-				std::construct_at(&c->data[ent_offset + i], comp_data(ent));
-			} else {
-				std::construct_at(&c->data[ent_offset + i], comp_data[i]);
-			}
-		}
-	}
-
-	void fill_data_in_existing_chunk(chunk_iter& curr, entity_range r) noexcept {
-		auto next = std::next(curr);
-
-		// If split chunks are encountered, skip forward to the chunk closest to r
-		if (curr->get_has_split_data()) {
-			while (chunks.end() != next && next->range.contains(r) && next->active < r) {
-				std::advance(curr, 1);
-				next = std::next(curr);
-			}
-		}
-
-		if (curr->active.adjacent(r) && curr->range.contains(r)) {
-			// The two ranges are next to each other, so add the data to existing chunk
-			entity_range active_range = entity_range::merge(curr->active, r);
-			curr->active = active_range;
-
-			// Check to see if this chunk can be collapsed into 'prev'
-			if (chunks.begin() != curr) {
-				auto prev = std::next(curr, -1);
-				if (prev->active.adjacent(curr->active)) {
-					active_range = entity_range::merge(prev->active, curr->active);
-					prev = remove_range_to_chunk(prev);
-					prev->active = active_range;
-
-					curr = free_chunk(curr);
-					next = std::next(curr);
-				}
-			}
-
-			// Check to see if 'next' can be collapsed into this chunk
-			if (chunks.end() != next) {
-				if (curr->active.adjacent(next->active)) {
-					active_range = entity_range::merge(curr->active, next->active);
-					next = free_chunk(next);
-
-					curr->active = active_range;
-
-					// split_data is true if the next chunk is also in the current range
-					curr->set_has_split_data((next != chunks.end()) && (curr->range == next->range));
-				}
-			}
-		} else {
-			// There is a gap between the two ranges, so split the chunk
-			if (r < curr->active) {
-				bool const curr_owns_data = curr->get_owns_data();
-				curr->set_owns_data(false);
-				curr = create_new_chunk(curr, curr->range, r, curr->data, curr_owns_data, true);
-			} else {
-				curr->set_has_split_data(true);
-				curr = create_new_chunk(std::next(curr), curr->range, r, curr->data, false, false);
-			}
-		}
-	}
-
 	// Try to combine two ranges. With data
 	static bool combiner_bound(entity_data& a, entity_data const& b) requires(!unbound<T>) {
 		if (a.rng.adjacent(b.rng) && is_equal(a.data, b.data)) {
@@ -2290,59 +2149,7 @@ private:
 		auto iter = vec.begin();
 		auto curr = chunks.begin();
 
-		// Fill in values
-		while (iter != vec.end()) {
-			if (chunks.empty()) {
-				curr = create_new_chunk<U>(curr, iter);
-			} else {
-				entity_range const r = iter->rng;
-
-				// Move current chunk iterator forward
-				auto next = std::next(curr);
-				while (chunks.end() != next && next->range < r) {
-					curr = next;
-					std::advance(next, 1);
-				}
-
-				if (curr->range.overlaps(r)) {
-					// Delayed pre-condition check: Can not add components more than once to same entity
-					Pre(!curr->active.overlaps(r), "entity already has a component of the type");
-
-					if (!curr->active.overlaps(r)) {
-						// The incoming range overlaps an unused area in the current chunk
-
-						// split the current chunk and fill in the data
-						entity_range const active_range = entity_range::intersect(curr->range, r);
-						fill_data_in_existing_chunk(curr, active_range);
-						if constexpr (!unbound<T>) {
-							construct_range_in_chunk(curr, active_range, iter->data);
-						}
-
-						if (active_range != r) {
-							auto const [remainder, x] = entity_range::remove(active_range, r);
-							Assert(!x.has_value(), "internal: there should not be a range here; create an issue on Github and investigate");
-							iter->rng = remainder;
-							continue;
-						}
-					} else {
-						// Incoming range overlaps the current one, so add it into 'curr'
-						fill_data_in_existing_chunk(curr, r);
-						if constexpr (!unbound<T>) {
-							construct_range_in_chunk(curr, r, iter->data);
-						}
-					}
-				} else if (curr->range < r) {
-					// Incoming range is larger than the current one, so add it after 'curr'
-					curr = create_new_chunk<U>(std::next(curr), iter);
-					// std::advance(curr, 1);
-				} else if (r < curr->range) {
-					// Incoming range is less than the current one, so add it before 'curr' (after 'prev')
-					curr = create_new_chunk<U>(curr, iter);
-				}
-			}
-
-			std::advance(iter, 1);
-		}
+		// TODO
 	}
 
 	// Add new queued entities and components to the main storage.
@@ -2410,25 +2217,25 @@ private:
 	}
 
 	void process_remove_components(std::vector<entity_range>& removes) noexcept {
-		chunk_iter it_chunk = chunks.begin();
+		auto it_chunk = chunks.begin();
 		auto it_rem = removes.begin();
 
 		while (it_chunk != chunks.end() && it_rem != removes.end()) {
-			if (it_chunk->active < *it_rem) {
+			if (it_chunk->range < *it_rem) {
 				std::advance(it_chunk, 1);
-			} else if (*it_rem < it_chunk->active) {
+			} else if (*it_rem < it_chunk->range) {
 				++it_rem;
 			} else {
 				//if (it_chunk->active == *it_rem) {
-				if (it_rem->contains(it_chunk->active)) {
+				if (it_rem->contains(it_chunk->range)) {
 					// Delete the chunk and potentially its data
-					it_chunk = free_chunk(it_chunk);
+					it_chunk = chunks.erase(it_chunk);
 				} else {
 					// remove partial range
-					auto const [left_range, maybe_split_range] = entity_range::remove(it_chunk->active, *it_rem);
+					auto const [left_range, maybe_split_range] = entity_range::remove(it_chunk->range, *it_rem);
 
-					// Update the active range
-					it_chunk->active = left_range;
+					// Update the range
+					it_chunk->range = left_range;
 
 					// Destroy the removed components
 					if constexpr (!unbound<T>) {

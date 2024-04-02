@@ -3,18 +3,21 @@
 
 #include "contract.h"
 #include <algorithm>
-#include <vector>
+#include <cstring>
 #include <memory>
 #include <span>
+#include <vector>
 
 namespace ecs::detail {
 	template <typename Fn, typename T>
 	concept callback_takes_a_span = std::invocable<Fn, std::span<T>>;
 
-	// the 'Scatter Allocator'.
+	// 'Scatter Allocator'
+	// 
 	// * A single allocation can result in many addresses being returned, as the
 	//   allocator fills in holes in the internal pools of memory.
-	// * It is *not* thread safe.
+	// * No object construction/destruction happens.
+	// * It is not thread safe.
 	// * Deallocated memory is reused before new memory is taken from pools.
 	//   This way old pools will be filled with new data before newer pools are tapped.
 	//   Filling it 'from the back' like this should keep fragmentation down.
@@ -29,7 +32,7 @@ namespace ecs::detail {
 			free_list.swap(other.free_list);
 		}
 		constexpr scatter_allocator& operator=(scatter_allocator const&) = delete;
-		constexpr scatter_allocator& operator =(scatter_allocator && other) {
+		constexpr scatter_allocator& operator=(scatter_allocator&& other) {
 			pools.swap(other.pools);
 			free_list.swap(other.free_list);
 			return *this;
@@ -87,17 +90,17 @@ namespace ecs::detail {
 			while (remaining_count > 0) {
 				if (ptr_pool == nullptr) {
 					auto const next_pow2_size = std::size_t{1} << std::bit_width(remaining_count);
-					ptr_pool = add_pool(pools ? pools->capacity << 1 : std::max(next_pow2_size, DefaultStartingSize));
+					ptr_pool = add_pool(pools ? pools->data.size() << 1 : std::max(next_pow2_size, DefaultStartingSize));
 				}
 
 				pool& p = *ptr_pool;
 				ptr_pool = ptr_pool->next.get();
 
-				std::size_t const min_space = std::min({remaining_count, (p.capacity - p.next_available)});
+				std::size_t const min_space = std::min({remaining_count, (p.data.size() - p.next_available)});
 				if (min_space == 0)
 					continue;
 
-				std::span<T> span{p.base.get() + p.next_available, min_space};
+				std::span<T> span = p.data.subspan(p.next_available, min_space);
 				alloc_callback(span);
 
 				p.next_available += min_space;
@@ -107,12 +110,19 @@ namespace ecs::detail {
 
 		constexpr void deallocate(std::span<T> const span) {
 			PreAudit(validate_addr(span), "Invalid address passed to deallocate()");
+
+			// Poison the allocation
+			if (!std::is_constant_evaluated())
+				std::memset(span.data(), 0xee, span.size_bytes());
+
+			// Add it to the free list
 			free_list = std::make_unique<free_block>(std::move(free_list), span);
 		}
 
 	private:
 		constexpr auto* add_pool(std::size_t const size) {
-			pools = std::make_unique<pool>(std::move(pools), std::make_unique_for_overwrite<T[]>(size), 0, size);
+			std::span data{std::allocator<T>{}.allocate(size), size};
+			pools = std::make_unique<pool>(0, data, std::move(pools));
 			return pools.get();
 		}
 
@@ -125,22 +135,25 @@ namespace ecs::detail {
 
 		constexpr bool validate_addr(std::span<T> const span) {
 			for (auto* p = pools.get(); p; p = p->next.get()) {
-				if (valid_addr(span.data(), p->base.get(), p->base.get() + p->capacity))
+				if (valid_addr(span.data(), &p->data.front(), &p->data.back()))
 					return true;
 			}
 			return false;
 		}
 
+		struct pool {
+			constexpr ~pool() {
+				std::allocator<T>{}.deallocate(data.data(), data.size());
+			}
+
+			std::size_t next_available;
+			std::span<T> data;
+			std::unique_ptr<pool> next;
+		};
+
 		struct free_block {
 			std::unique_ptr<free_block> next;
 			std::span<T> span;
-		};
-
-		struct pool {
-			std::unique_ptr<pool> next;
-			std::unique_ptr<T[]> base;
-			std::size_t next_available;
-			std::size_t capacity;
 		};
 
 		std::unique_ptr<pool> pools;
@@ -158,7 +171,7 @@ namespace ecs::detail {
 			});
 			return elems_to_alloc == total_alloc;
 		}(),
-		"Array-scatter allocator allocates correctly");
+		"allocates correctly");
 
 	static_assert(
 		[] {
@@ -168,7 +181,7 @@ namespace ecs::detail {
 			alloc.deallocate(subspan);
 			return true;
 		}(),
-		"Array-scatter allocator frees correctly");
+		"frees correctly");
 
 	static_assert(
 		[] {
@@ -187,7 +200,24 @@ namespace ecs::detail {
 			});
 			return (count == 4);
 		}(),
-		"Array-scatter allocator scatters correctly");
+		"scatters correctly");
+
+	static_assert(
+		[] {
+			constexpr std::size_t elems_to_alloc = 12;
+			scatter_allocator<int> alloc;
+			std::span<int> span;
+			alloc.allocate_with_callback(elems_to_alloc, [&](std::span<int> s) {
+				span = s;
+			});
+			for (int& i : span) {
+				std::construct_at(&i);
+				std::destroy_at(&i);
+			}
+			alloc.deallocate(span);
+			return true;
+		}(),
+		"works with construction/destruction");
 } // namespace ecs::detail
 
 #endif // !ECS_DETAIL_ARRAY_SCATTER_ALLOCATOR_H

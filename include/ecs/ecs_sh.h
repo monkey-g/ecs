@@ -770,7 +770,7 @@ namespace ecs::detail {
 	};
 
 	struct default_contract_violation_impl {
-		void panic(char const* why, char const* what, char const* how) noexcept {
+		[[noreturn]] void panic(char const* why, char const* what, char const* how) noexcept {
 			std::cerr << why << ": \"" << how << "\"\n\t" << what << "\n\n";
 #ifdef __cpp_lib_stacktrace
 			// Dump a stack trace if available
@@ -804,21 +804,21 @@ ECS_EXPORT namespace ecs {
 namespace ecs::detail {
 	template <typename... DummyArgs>
 		requires(sizeof...(DummyArgs) == 0)
-	[[noreturn]] inline void do_assertion_failed(char const* what, char const* how) {
+	inline void do_assertion_failed(char const* what, char const* how) {
 		ecs::detail::contract_violation_interface auto& cvi = ecs::contract_violation_handler<DummyArgs...>;
 		cvi.assertion_failed(what, how);
 	}
 
 	template <typename... DummyArgs>
 		requires(sizeof...(DummyArgs) == 0)
-	[[noreturn]] inline void do_precondition_violation(char const* what, char const* how) {
+	inline void do_precondition_violation(char const* what, char const* how) {
 		ecs::detail::contract_violation_interface auto& cvi = ecs::contract_violation_handler<DummyArgs...>;
 		cvi.precondition_violation(what, how);
 	}
 
 	template <typename... DummyArgs>
 		requires(sizeof...(DummyArgs) == 0)
-	[[noreturn]] inline void do_postcondition_violation(char const* what, char const* how) {
+	inline void do_postcondition_violation(char const* what, char const* how) {
 		ecs::detail::contract_violation_interface auto& cvi = ecs::contract_violation_handler<DummyArgs...>;
 		cvi.postcondition_violation(what, how);
 	}

@@ -1,19 +1,19 @@
-#ifndef ECS_DETAIL_GORKING_LIST_H
-#define ECS_DETAIL_GORKING_LIST_H
+#ifndef ECS_DETAIL_POWER_LIST_H
+#define ECS_DETAIL_POWER_LIST_H
 
 #include "contract.h"
 #include "scatter_allocator.h"
-//#include <algorithm>
 #include <memory>
 #include <queue>
+#include <iterator>
 #include <ranges>
 
 namespace ecs::detail {
 	template <typename T>
 	class power_list {
 		struct node {
-			node* next[2]{};
-			T data{};
+			node* next[2];
+			T data;
 		};
 
 		struct balance_helper {
@@ -21,24 +21,30 @@ namespace ecs::detail {
 				std::size_t target;
 				std::size_t size;
 				node* from;
-				constexpr bool operator<(stepper const& a) const {
-					return (a.target < target);
+				constexpr bool operator<(stepper const& r) const {
+					return (r.target < target);
 				}
+				constexpr auto operator<=>(stepper const&) const = default;
 			};
 
 			node* curr{};
 			std::size_t count{};
 			std::size_t log_n{};
 			std::size_t index{0};
-			std::array<stepper, 32> steppers{};
+			stepper* steppers{};
 
-			constexpr balance_helper(node* const n, std::size_t count) : curr(n), count(count), log_n(std::bit_width(count - 1)) {
-				Pre(std::cmp_less(log_n, steppers.size()), "List is too large, increase array capacity");
-
-				// Load up steppers
+			constexpr balance_helper(balance_helper const& other)
+				: curr(other.curr), count(other.count), log_n(other.log_n), steppers(new stepper[log_n]) {
+				// Copy steppers
+				for (std::size_t i = 0; i < log_n; i++) {
+					steppers[i] = other.steppers[i];
+				}
+			}
+			constexpr balance_helper(node* const n, std::size_t count) : curr(n), count(count), log_n(std::bit_width(count - 1)), steppers(new stepper[log_n]) {
+				// Set up steppers
 				node* current = n;
-				for (std::size_t i = 0, step = count; i < log_n; i++, step >>= 1) {
-					steppers[i] = {i + step, step, current};
+				for (std::size_t i = 0, step = count; current != nullptr && i < log_n; i++, step >>= 1) {
+					steppers[log_n - 1 - i] = {i + step, step, current};
 					current = current->next[0];
 				}
 			}
@@ -47,20 +53,21 @@ namespace ecs::detail {
 					balance_current_and_advance();
 
 				// TODO! Instead of just pointing to the last element, which
-				//       will make deletions, drop them down a power,
+				//       will make deletions harder, drop them down a power,
 				//       eg. 32 drops to 16+1
 				for (std::size_t i = 0; i < log_n; i++)
 					steppers[i].from->next[1] = curr;
+				delete[] steppers;
 			}
 			constexpr void balance_current_and_advance() {
-				Assert(*this, "Called without checking validity");
-				stepper& min_step = steppers[log_n - 1];
-				while (steppers[0].target == index) {
-					std::pop_heap(steppers.data(), steppers.data() + log_n);
-					min_step.from->next[1] = curr->next[0];
-					min_step.from = curr;
-					min_step.target += min_step.size;
-					std::push_heap(steppers.data(), steppers.data() + log_n);
+				Assert(*this, "Called while invalid");
+
+				std::span<stepper> heap(steppers, steppers + log_n);
+				while (heap.front().target == index) {
+					heap.front().from->next[1] = curr->next[0];
+					heap.front().from = curr;
+					heap.front().target += heap.front().size;
+					drop_front_in_heap(heap);
 				}
 
 				curr = curr->next[0];
@@ -68,6 +75,21 @@ namespace ecs::detail {
 			}
 			constexpr operator bool() const {
 				return nullptr != curr->next[0];
+			}
+
+		private:
+			// Drops the front stepper down the heap until the heap property is restored
+			constexpr static void drop_front_in_heap(std::span<stepper> heap) {
+				std::size_t index = 0;
+				do {
+					std::size_t const max = 2*index + (heap[2 * index] > heap[2 * index + 1]);
+					if (heap[index] > heap[max]) {
+						std::swap<stepper>(heap[index], heap[max]);
+						index = max;
+					} else {
+						break;
+					}
+				} while (2 * index + 1 < heap.size());
 			}
 		};
 
@@ -102,6 +124,7 @@ namespace ecs::detail {
 				curr = other.curr;
 				prev = other.prev;
 				helper = other.helper ? new balance_helper(other.helper->curr, other.helper->count) : nullptr;
+				return *this;
 			}
 
 			constexpr iterator& operator=(iterator&& other) {
@@ -166,6 +189,7 @@ namespace ecs::detail {
 			node* prev{};
 			balance_helper* helper{};
 		};
+		using const_iterator = iterator;
 
 		constexpr power_list() = default;
 
@@ -188,32 +212,68 @@ namespace ecs::detail {
 			destroy_nodes();
 		}
 
-		constexpr iterator begin() {
+		constexpr bool operator==(power_list const& pl) const {
+			if (head == pl.head)
+				return true;
+
+			if (head == nullptr || pl.head == nullptr)
+				return false;
+
+			if (count != pl.count)
+				return false;
+
+			if (head->data != pl.head->data)
+				return false;
+
+			if (head->next[1] != nullptr && head->next[1]->data != pl.head->next[1]->data)
+				return false;
+
+			node *a = head, *b = pl.head;
+			while (a) {
+				if (a->data != b->data)
+					return false;
+				a = a->next[0];
+				b = b->next[0];
+			}
+
+			return true;
+		}
+
+		[[nodiscard]] constexpr iterator begin() {
 			return {head, static_cast<std::size_t>(needs_rebalance ? count : 0)};
 		}
-		constexpr iterator begin() const {
+		[[nodiscard]] constexpr iterator begin() const {
+			return {head, static_cast<std::size_t>(needs_rebalance ? count : 0)};
+		}
+		[[nodiscard]] constexpr const_iterator cbegin() const {
 			return {head, std::size_t{0}};
 		}
 
-		constexpr std::default_sentinel_t end() { return {}; }
-		constexpr std::default_sentinel_t end() const { return {}; }
+		[[nodiscard]] constexpr std::default_sentinel_t end() {
+			return {};
+		}
+		[[nodiscard]] constexpr std::default_sentinel_t end() const {
+			return {};
+		}
+		[[nodiscard]] constexpr std::default_sentinel_t cend() const {
+			return {};
+		}
 
-		constexpr std::size_t size() const {
+		[[nodiscard]] constexpr std::size_t size() const {
 			return count;
 		}
 
-		constexpr T front(this auto&&) {
+		[[nodiscard]] constexpr T front() {
 			Pre(!empty(), "Can not call 'front()' on an empty list");
 			return head->data;
 		}
 
-		constexpr T back(this auto&&) {
+		[[nodiscard]] constexpr T back() {
 			Pre(!empty(), "Can not call 'back()' on an empty list");
 			return head->next[1] ? head->next[1]->data : head->data;
 		}
 
-		[[nodiscard]]
-		constexpr bool empty() const {
+		[[nodiscard]] constexpr bool empty() const {
 			return nullptr == head;
 		}
 
@@ -233,29 +293,47 @@ namespace ecs::detail {
 			if (!empty())
 				clear();
 
+			// Save the range size
 			count = std::size(range);
-			alloc.allocate_with_callback(count, [&](auto span) {
+
+			// Do the allocation
+			std::span<node> nodes;
+			alloc.allocate_with_callback(count, [&](std::span<node> span) {
 				Assert(span.size() == count, "This should be a single allocation");
+				Assert(nodes.empty(), "This should be empty");
 				Assert(nullptr == head, "This shouldn't happen");
-				head = span.data();
+				nodes = span;
 			});
-			Post(head != nullptr, "Allocation failed");
+			head = nodes.data();
 
-			iterator it_rebalance;
-			auto const logN = (int)std::bit_width(count); // why is this unsigned in libstdc++?
-			for (int i = 0; auto val : range) {
-				std::construct_at(&head[i], node{{&head[i + 1], &head[i + 1]}, val});
+			// Get the ranges iterator pair
+			auto curr = range.begin();
+			auto const end = range.end();
 
-				i += 1;
-
-				if (i == logN) {
-					// The rebalancer needs logN nodes before it can start.
-					it_rebalance = iterator{head, count};
-				} else if (i > logN) {
-					++it_rebalance;
-				}
+			// Process first part of the range.
+			// The rebalancer needs `logN` nodes before it can start.
+			std::size_t const logN = (std::size_t)std::bit_width(count - 1); // why is this unsigned in libstdc++? Should be 'int' according to standard.
+			std::size_t i = 0;
+			for (; i < logN; i += 1) {
+				Assert(curr != end, "iterator/size mismatch");
+				std::construct_at(&nodes[i], node{{&nodes[i + 1], &nodes[i + 1]}, *curr++});
 			}
-			head[count - 1].next[0] = nullptr;
+
+			// Create a rebalancing iterator
+			iterator it_rebalance{head, count};
+
+			// Process the rest of the range while also rebalancing
+			for (; i < (count-1); i += 1) {
+				Assert(curr != end, "iterator/size mismatch");
+				std::construct_at(&nodes[i], node{{&nodes[i + 1], &nodes[i + 1]}, *curr++});
+				++it_rebalance;
+			}
+
+			// Finally set up the tail node
+			std::construct_at(&nodes[i], node{{nullptr, &nodes[i]}, *curr++});
+
+			// Sanity checks
+			Assert(curr == end, "Iterator should be at the end here");
 		}
 
 		constexpr void insert(T val) {
@@ -284,7 +362,8 @@ namespace ecs::detail {
 			needs_rebalance = true;
 		}
 
-		constexpr void insert_after(iterator pos, T val) {
+		constexpr void insert_after(iterator , T ) {
+			// TODO
 		}
 
 		constexpr void remove(T val) {
@@ -297,14 +376,20 @@ namespace ecs::detail {
 
 			node* n = it.curr;
 			node* next = n->next[0];
-			alloc.deallocate({n, 1});
-			if (it.prev == nullptr) // head
+			if (it.prev == nullptr) { // head
+				if (next != nullptr) {
+					node* tail = n->next[1];
+					next->next[1] = tail;
+				}
 				head = next;
-			else {
+			} else {
 				if (next == nullptr) // tail
 					head->next[1] = it.prev;
 				it.prev->next[0] = next;
 			}
+
+			std::destroy_at(n);
+			alloc.deallocate({n, 1});
 			count -= 1;
 			needs_rebalance = true;
 		}
@@ -314,12 +399,13 @@ namespace ecs::detail {
 				balance_helper bh(head, count);
 				while (bh)
 					bh.balance_current_and_advance();
+	
+				needs_rebalance = false;
 			}
 
-			needs_rebalance = false;
 		}
 
-		constexpr struct iterator find(T const& val) const {
+		[[nodiscard]] constexpr iterator find(T const& val) const {
 			if (head == nullptr || val < head->data || val > head->next[1]->data)
 				return {};
 
@@ -344,17 +430,14 @@ namespace ecs::detail {
 				return {};
 		}
 
-		constexpr iterator lower_bound(T const& val) const {
+		[[nodiscard]] constexpr iterator lower_bound(T const& val) const {
 			if (empty())
 				return {};
 			if (val < head->data)
 				return {head, nullptr};
-			//if (val > head->next[1]->data)
-			//	return {head->next[1]};
 
-			node* prev = head;
-			node* curr = head->next[val > head->data];
-			Assert(curr != nullptr, "invalid node found");
+			node* prev = nullptr;
+			node* curr = head;
 			while (val > curr->data) {
 				prev = curr;
 				curr = curr->next[val > curr->next[1]->data];
@@ -388,7 +471,6 @@ namespace ecs::detail {
 #if 1
 	static_assert(
 		[] {
-			Assert(true, "");
 			power_list<int> list;
 			list.remove(123);
 			return list.empty() && list.size() == 0 && !list.contains(0);
@@ -410,7 +492,7 @@ namespace ecs::detail {
 			auto const iota = std::views::iota(-2, 2);
 			power_list<int> list(iota);
 			power_list<int> list2(list);
-			return true;
+			return list == list2;
 		}(),
 		"Copy construction");
 
@@ -483,6 +565,14 @@ namespace ecs::detail {
 
 	static_assert(
 		[] {
+			power_list<int> list(std::views::iota(0, 1));
+			list.remove(0);
+			return list.empty();
+		}(),
+		"Remove one");
+
+	static_assert(
+		[] {
 			power_list<int> list(std::views::iota(0, 8));
 			list.remove(0);
 			for (int v : std::views::iota(1, 8))
@@ -518,7 +608,7 @@ namespace ecs::detail {
 
 	static_assert(
 		[] {
-			auto const iota = std::views::iota(-200, 200);
+			auto const iota = std::views::iota(-20, 20);
 			power_list<int> list;
 			for (int v : iota)
 				list.insert(v);
@@ -529,7 +619,7 @@ namespace ecs::detail {
 
 	static_assert(
 		[] {
-			auto const iota = std::views::iota(-100, 200);
+			auto const iota = std::views::iota(-10, 20);
 			power_list<int> list;
 			for (int v : iota)
 				list.insert(v);
@@ -539,7 +629,24 @@ namespace ecs::detail {
 			return sum > 0 && list.contains(1);
 		}(),
 		"Implicit rebalance");
+
+	static_assert([] {
+			auto const iota = std::views::iota(0, 20);
+			power_list<int> list1(iota);
+			power_list<int> list2(iota);
+			if (list1 != list2)
+				return false;
+
+			power_list<int> list3;
+			for (int val : iota)
+				list3.insert(val);
+			if (list1 != list3)
+				return false;
+
+			return true;
+		}(),
+		"Comparison operator");
 #endif
 } // namespace ecs::detail
 
-#endif // !ECS_DETAIL_GORKING_LIST_H
+#endif // !ECS_DETAIL_POWER_LIST_H

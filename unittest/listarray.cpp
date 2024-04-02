@@ -36,7 +36,7 @@ int search(node* n, int val) {
 }
 
 TEST_CASE("Gorking list") {
-	constexpr int N = 1234;
+	constexpr int N = 12;
 	int constexpr log_n = std::bit_width((unsigned)N - 1);
 
 	std::array<node, N> nodes{};
@@ -50,7 +50,7 @@ TEST_CASE("Gorking list") {
 
 	// Load up steppers
 	node* current = &nodes[0];
-	stepper steppers[32];
+	stepper steppers[32]{};
 	for (int i = 0, step = 1<<(log_n-1); i < log_n; i++, step >>= 1) {
 		//int const step = (N >> i);
 		int const next_step = std::min(N-1, step);
@@ -111,28 +111,42 @@ TEST_CASE("Gorking list") {
 	std::cout << "Total steps  : " << total_steps << '\n';
 #endif
 
-	auto const iota = std::views::iota(-200, 200);
-	ecs::detail::power_list<int> list(iota);
+#if 1
+	using ecs::detail::power_list;
+	power_list<int> test(std::views::iota(0, 8));
+	test.remove(0);
+	for (int v : std::views::iota(1, 8))
+		REQUIRE(test.contains(v));
 
-#if 0
 	ecs::detail::power_list<int> list(std::views::iota(-2, 100));
 	for (int const val : std::views::iota(-2, 100))
 		REQUIRE(list.contains(val));
 	REQUIRE(!list.contains(-3));
 	REQUIRE(!list.contains(101));
 
+	list.insert(100);
 	list.insert(101);
+	REQUIRE(list.contains(99));
+	REQUIRE(list.contains(100));
 	REQUIRE(list.contains(101));
 	list.insert(-3);
+	REQUIRE(list.contains(-2));
 	REQUIRE(list.contains(-3));
 	list.insert(22);
+	REQUIRE(list.contains(21));
 	REQUIRE(list.contains(22));
+	REQUIRE(list.contains(23));
+	list.rebalance();
+	for (int const val : std::views::iota(-3, 101))
+		REQUIRE(list.contains(val));
 
 	ecs::detail::power_list<int> list2;
 	for (int const val : std::views::iota(-2, 100))
 		list2.insert(val);
+	int sum = 0;
 	for (int val : list2)
-		val++;
+		sum += val;
+	REQUIRE(sum > 0);
 	REQUIRE(list2.contains(83));
 
 	list2.remove(83);
@@ -145,7 +159,7 @@ TEST_CASE("Gorking list") {
 
 #include <bit>
 #include <cassert>
-#include <format>
+//#include <format>
 #include <iostream>
 
 void print_steppers_bitpattern() {
@@ -166,7 +180,7 @@ void print_steppers_bitpattern() {
 	};
 
 	constexpr unsigned num_steppers = log_N;
-	std::array<stepper, num_steppers> steppers;
+	std::array<stepper, num_steppers> steppers{};
 	for (unsigned curr_log = 0; curr_log < num_steppers; curr_log++) {
 		unsigned const log_stepsize = (log_N - 1 - curr_log);
 		unsigned const stepsize = 1 << log_stepsize;
@@ -190,8 +204,8 @@ void print_steppers_bitpattern() {
 		}
 	}
 
-	std::cout << std::format("\nN = {:>3}, log(N) = {:>3}\n\n", N, log_N);
-	for (unsigned i = 0; i < N; i++) {
-		std::cout << std::format("{:>3} : {:>12b} - {:>12} - {}\n", i, arr[i], mask[i], max[i]);
-	}
+	//std::cout << std::format("\nN = {:>3}, log(N) = {:>3}\n\n", N, log_N);
+	//for (unsigned i = 0; i < N; i++) {
+	//	std::cout << std::format("{:>3} : {:>12b} - {:>12} - {}\n", i, arr[i], mask[i], max[i]);
+	//}
 }

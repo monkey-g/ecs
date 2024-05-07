@@ -1,4 +1,4 @@
-name: GCC 11/12/13
+name: GCC 11/12/13/14
 
 on: workflow_call
 
@@ -9,8 +9,12 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        version: [11, 12, 13]
+        version: [11, 12, 13, 14]
+        modules: [false]
         built_type: [Debug, Release]
+        include:
+         - version: 14
+           modules: true
 
     steps:
     - uses: actions/checkout@v4
@@ -49,7 +53,7 @@ jobs:
             -G Ninja
             -D CMAKE_BUILD_TYPE=${{ matrix.build_type }}
             -D CMAKE_MAKE_PROGRAM=${ninja_program}
-            -D ECS_COMPILE_AS_MODULE=false
+            -D ECS_COMPILE_AS_MODULE=${{ matrix.modules }}
           RESULT_VARIABLE result
         )
         if (NOT result EQUAL 0)

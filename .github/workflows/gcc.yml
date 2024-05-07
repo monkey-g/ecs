@@ -13,7 +13,8 @@ jobs:
         built_type: [Debug, Release]
         modules: [false]
         include:
-         - version: 14
+         - version: 14  # use modules in v14
+           built_type: [Debug, Release]
            modules: [false, true]
 
     steps:

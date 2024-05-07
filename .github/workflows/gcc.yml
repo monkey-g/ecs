@@ -9,12 +9,13 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        version: [11, 12, 13, 14]
+        version: [11, 12, 13]
         built_type: [Debug, Release]
         modules: [false]
         include:
          - version: 14  # use modules in v14
-           modules: [true]
+           built_type: [Debug, Release]
+           modules: [false, true]
 
     steps:
     - uses: actions/checkout@v4

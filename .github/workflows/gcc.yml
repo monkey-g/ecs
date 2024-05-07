@@ -9,7 +9,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        version: [11, 12, 13]
+        version: [11, 12, 13, 14]
         built_type: [Debug, Release]
         include:
          - version: 14  # use modules in v14

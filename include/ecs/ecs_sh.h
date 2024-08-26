@@ -465,10 +465,10 @@ namespace ecs::detail {
 		};
 
 		template <typename First, typename... Types>
-		constexpr type_list<Types...>* skip_first_type(type_list<First, Types...>*) ECS_NULLBODY
+		constexpr type_list<Types...>* skip_first_type(type_list<First, Types...>*) ECS_NULLBODY;
 
-			template <typename TL, template <typename O> typename Transformer>
-			struct transform_type {
+		template <typename TL, template <typename O> typename Transformer>
+		struct transform_type {
 			template <typename... Types>
 			constexpr static type_list<Transformer<Types>...>* helper(type_list<Types...>*);
 
@@ -484,10 +484,10 @@ namespace ecs::detail {
 		};
 
 		template <typename T, typename... Types>
-		constexpr type_list<Types..., T>* add_type(type_list<Types...>*) ECS_NULLBODY
+		constexpr type_list<Types..., T>* add_type(type_list<Types...>*) ECS_NULLBODY;
 
-			template <typename TL, typename T>
-			using add_type_t = std::remove_pointer_t<decltype(add_type<T>(static_cast<TL*>(nullptr)))>;
+		template <typename TL, typename T>
+		using add_type_t = std::remove_pointer_t<decltype(add_type<T>(static_cast<TL*>(nullptr)))>;
 
 		template <typename TL, template <typename O> typename Predicate>
 		struct split_types_if {
@@ -602,6 +602,18 @@ namespace ecs::detail {
 				return merger::helper(left, skip_first_type(right));
 			}
 #endif
+		};
+
+		// Reduce a collection of type_lists
+		template <template <typename L1, typename L2> typename Op>
+		struct reducer {
+			template <typename Dest, typename First, typename... Lists>
+			consteval static auto helper() {
+				if constexpr (sizeof...(Lists) == 0)
+					return null_tlist<Op<Dest, First>>();
+				else
+					return reducer::helper<Op<Dest, First>, Lists...>();
+			}
 		};
 
 	} // namespace impl
@@ -750,6 +762,14 @@ namespace ecs::detail {
 	// merge two type_list, duplicate types are ignored
 	template <impl::TypeList TL1, impl::TypeList TL2>
 	using merge_type_lists = std::remove_pointer_t<decltype(impl::merger::helper(static_cast<TL1*>(nullptr), static_cast<TL2*>(nullptr)))>;
+
+	// Reduce a collection of type_lists
+	template <template <typename L1, typename L2> typename Op, impl::TypeList... Lists>
+	using reduce_lists = std::remove_pointer_t<
+		decltype(
+			impl::reducer<Op>::template helper<type_list<>, Lists...>()
+		)
+	>;
 
 } // namespace ecs::detail
 #endif // !ECS_DETAIL_TYPE_LIST_H
@@ -4367,6 +4387,7 @@ private:
 
 
 namespace ecs {
+	template<class Systems>
 	ECS_EXPORT class runtime {
 	public:
 		// Add several components to a range of entities. Will not be added until 'commit_changes()' is called.

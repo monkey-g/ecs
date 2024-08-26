@@ -16,6 +16,7 @@
 #include "options.h"
 
 namespace ecs {
+	template<class Systems>
 	ECS_EXPORT class runtime {
 	public:
 		// Add several components to a range of entities. Will not be added until 'commit_changes()' is called.

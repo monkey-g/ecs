@@ -150,6 +150,7 @@ if (ECS_STANDALONE_PROJECT)
     # Examples
     add_subdirectory ("examples/entt_example")
     add_subdirectory ("examples/example")
+    add_subdirectory ("examples/static_example")
     add_subdirectory ("examples/variant")
     add_subdirectory ("examples/filtering")
     add_subdirectory ("examples/interval")

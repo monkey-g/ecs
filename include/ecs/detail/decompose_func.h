@@ -7,6 +7,7 @@ namespace ecs::detail {
 	struct decomposed {
 		using return_type = R;
 		using param_types = type_list<Args...>;
+		using naked_types = type_list<naked_component_t<Args>...>;
 
 		template <typename IR, typename... IArgs>
 		consteval decomposed(IR(IArgs...)) {}

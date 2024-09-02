@@ -11,27 +11,27 @@
 namespace ecs::detail {
 
 // Given a list of components, return an array containing the corresponding component pools
-template <typename ComponentsList, typename PoolsList>
+template <typename ComponentsList>
 	requires(std::is_same_v<ComponentsList, transform_type<ComponentsList, naked_component_t>>)
-auto get_pool_iterators([[maybe_unused]] component_pools<PoolsList> const& pools) {
+auto get_pool_iterators([[maybe_unused]] auto const& pools) {
 	if constexpr (type_list_is_empty<ComponentsList>) {
 		return std::array<stride_view<0, char const>, 0>{};
 	} else {
 		// Verify that the component list passed has a corresponding pool
-		for_each_type<ComponentsList>([]<typename T>() {
-			static_assert(contains_type<T, PoolsList>(), "A component is missing its corresponding component pool");
-		});
+		//for_each_type<ComponentsList>([]<typename T>() {
+		//	static_assert(contains_type<T, PoolsList>(), "A component is missing its corresponding component pool");
+		//});
 
-		return for_all_types<ComponentsList>([&]<typename... Components>() {
-			return std::to_array({pools.template get<Components>().get_entities()...});
+		return with_all_types<ComponentsList>([&]<typename... Components>() {
+			return std::to_array({std::get<component_pool<Components>>(pools).get_entities()...});
 		});
 	}
 }
 
 
 // Find the intersection of the sets of entities in the specified pools
-template <typename InputList, typename PoolsList, typename F>
-void find_entity_pool_intersections_cb(component_pools<PoolsList> const& pools, F&& callback) {
+template <typename InputList, typename F>
+void find_entity_pool_intersections_cb(auto const& pools, F&& callback) {
 	static_assert(not type_list_is_empty<InputList>, "Empty component list supplied");
 
 	// Split the type_list into filters and non-filters (regular components).

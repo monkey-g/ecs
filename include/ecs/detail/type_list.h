@@ -128,7 +128,7 @@ namespace ecs::detail {
 		}
 
 		template <typename... Types, typename F>
-		constexpr decltype(auto) for_all_types(F&& f, type_list<Types...>*) {
+		constexpr decltype(auto) with_all_types(F&& f, type_list<Types...>*) {
 			return f.template operator()<Types...>();
 		}
 
@@ -403,11 +403,11 @@ namespace ecs::detail {
 		impl::for_specific_type_or<T>(f, nf, static_cast<TL*>(nullptr));
 	}
 
-	// Applies the functor F to all types in the type list.
+	// Applies the functor F once with all types in the type list.
 	// Takes lambdas of the form '[]<typename ...T>() {}'
 	template <impl::TypeList TL, typename F>
-	constexpr decltype(auto) for_all_types(F&& f) {
-		return impl::for_all_types(f, static_cast<TL*>(nullptr));
+	constexpr decltype(auto) with_all_types(F&& f) {
+		return impl::with_all_types(f, static_cast<TL*>(nullptr));
 	}
 
 	// Applies the bool-returning functor F to each type in the type list.

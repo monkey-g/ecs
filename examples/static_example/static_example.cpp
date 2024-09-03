@@ -1,6 +1,6 @@
+#include <iostream>
 #include <ecs/ecs.h>
 #include <ecs/detail/static_context.h>
-#include <iostream>
 
 // The component
 struct greeting {

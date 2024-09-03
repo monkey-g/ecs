@@ -60,7 +60,7 @@ private:
 
 			// TODO store this in separate container in system_hierarchy? might not be
 			//      needed after O(1) pool lookup implementation
-			return for_all_types<parent_type_list_t<T>>([&]<typename... ParentTypes>() {
+			return with_all_types<parent_type_list_t<T>>([&]<typename... ParentTypes>() {
 				return T{pid, get_component<ParentTypes>(pid, pools)...};
 			});
 		} else {

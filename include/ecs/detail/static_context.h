@@ -1,12 +1,11 @@
 #pragma once
-#include "component_pools.h"
+#include <tuple>
 #include "decompose_func.h"
 #include "options.h"
 #include "parent_id.h"
 #include "system_defs.h"
 #include "type_list.h"
 #include "static_system_ranged.h"
-#include <tuple>
 
 namespace ecs::detail {
 	// Holds all the systems to be used
@@ -48,16 +47,17 @@ namespace ecs::detail {
 		using xform_to_systems = std::tuple<static_system_ranged<typename SystemInfos::param_types>...>;
 		using all_systems = transform_type_all<systems_info, xform_to_systems>;
 
+		// A pipeline of system indices
+		template<int N>
+		using pipeline = std::array<int, N>;
+
 	public:
 		constexpr void build() {
-			std::apply([](auto&... pools) {
-					(pools.process_changes(), ...);
-				}, pools);
+			auto const process_pools = [](auto&... pools) { (pools.process_changes(), ...); };
+			auto const build_systems = [&](auto& ...sys) { (sys.build(*this), ...); };
 
-			auto runner = [&](auto& ...sys) {
-				(sys.build(*this), ...);
-			};
-			std::apply(runner, systems);
+			std::apply(process_pools, pools);
+			std::apply(build_systems, systems);
 		}
 
 		constexpr void run() {
@@ -65,11 +65,6 @@ namespace ecs::detail {
 				constexpr auto index = index_of<T, all_wrapped_systems>();
 				std::get<index>(systems).run(T::sys);
 			});
-
-			//auto runner = [&](auto& ...sys) {
-			//	(sys.run(), ...);
-			//};
-			//std::apply(runner, systems);
 		}
 
 		constexpr all_pools& get_pools() {
@@ -146,7 +141,7 @@ namespace ecs::detail {
 				// Iterate over a systems parameters
 				return std::tuple{
 					with_all_types<ParamLists>([&last_index, I = index++]<typename... Params>() {
-						// Get the last index the types were used
+						// Get the last index where the types were used
 						auto arr = std::array{last_index[index_of<Params, flattened_naked_types>()]...};
 
 						// Update the indices of the parameter types to the current index
@@ -160,10 +155,8 @@ namespace ecs::detail {
 
 		// Get a system graph
 		template<int SystemIndex>
-		static consteval auto get_system_graph() {
-			if constexpr (SystemIndex >= 0)
-				return get_system_graph<std::get<SystemIndex>(dependency_matrix)[0]>();
-			return -1;
+		static consteval auto build_pipeline() {
+			return pipeline{SystemIndex};
 		}
 
 		// Returns true if the system component can be written to

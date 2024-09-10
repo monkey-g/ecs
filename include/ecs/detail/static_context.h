@@ -1,15 +1,18 @@
 #pragma once
 #include <tuple>
+#include <bitset>
 #include "decompose_func.h"
 #include "options.h"
 #include "parent_id.h"
 #include "system_defs.h"
 #include "type_list.h"
 #include "static_system_ranged.h"
+#include "compile_time_value.h"
 
 namespace ecs::detail {
 	// Holds all the systems to be used
 	template <auto... Systems> // TODO concept
+		requires(sizeof...(Systems) > 0)
 	class static_context {
 		template<auto System>
 		struct system_wrap {
@@ -35,8 +38,8 @@ namespace ecs::detail {
 		template <typename... Ts>
 		using xform_to_pools = std::tuple<component_pool<Ts>...>;
 
-		using all_wrapped_systems = type_list<system_wrap<Systems>...>;
 		using systems_info = decompose_all<Systems...>;
+		using all_wrapped_systems = type_list<system_wrap<Systems>...>;
 		using all_param_types = transform_type_all<systems_info, xform_to_param_types>;
 		using all_naked_types = transform_type_all<systems_info, xform_to_naked_types>;
 		using flattened_naked_types = transform_type_all<all_naked_types, xform_flatten_param_types>;
@@ -51,9 +54,15 @@ namespace ecs::detail {
 		template<int N>
 		using pipeline = std::array<int, N>;
 
+		// Bitset of visited types
+		using bs_pipeline = std::bitset<type_list_size<systems_info>>;
+
 	public:
 		constexpr void build() {
-			auto const process_pools = [](auto&... pools) { (pools.process_changes(), ...); };
+			//auto d = build_dependency_matrix();
+			//auto p = build_pipelines();
+
+			auto const process_pools = [](auto&... ps) { (ps.process_changes(), ...); };
 			auto const build_systems = [&](auto& ...sys) { (sys.build(*this), ...); };
 
 			std::apply(process_pools, pools);
@@ -80,23 +89,23 @@ namespace ecs::detail {
 			static_assert((!std::is_pointer_v<std::remove_cvref_t<T>> && ...), "can not add pointers to entities; wrap them in a struct");
 			static_assert((!detail::is_variant_of_pack<T...>()), "Can not add more than one component from the same variant");
 
-			auto const adder = []<typename Type>(auto& pools, entity_range const range, Type&& val) {
+			auto const adder = []<typename Type>(auto& in_pools, entity_range const range, Type&& val) {
 				// Add it to the component pool
 				if constexpr (detail::is_parent<Type>::value) {
-					auto& pool = std::get<component_pool<parent_id>>(pools);
+					auto& pool = std::get<component_pool<parent_id>>(in_pools);
 					Pre(!pool.has_entity(range), "one- or more entities in the range already has this type");
 					pool.add(range, detail::parent_id{val.id()});
 				} else if constexpr (std::is_reference_v<Type>) {
 					using DerefT = std::remove_cvref_t<Type>;
 					static_assert(std::copyable<DerefT>, "Type must be copyable");
 
-					auto& pool = std::get<component_pool<DerefT>>(pools);
+					auto& pool = std::get<component_pool<DerefT>>(in_pools);
 					Pre(!pool.has_entity(range), "one- or more entities in the range already has this type");
 					pool.add(range, val);
 				} else {
 					static_assert(std::copyable<Type>, "Type must be copyable");
 
-					auto& pool = std::get<component_pool<Type>>(pools);
+					auto& pool = std::get<component_pool<Type>>(in_pools);
 					Pre(!pool.has_entity(range), "one- or more entities in the range already has this type");
 					pool.add(range, std::forward<Type>(val));
 				}
@@ -130,15 +139,27 @@ namespace ecs::detail {
 		}
 
 	private:
+		// Returns true if the system component can be written to
+		template <int SystemIndex, int ComponentIndex>
+		static consteval bool writes_to_component() {
+			using system_params = typename type_at<SystemIndex, systems_info>::param_types;
+			using component = type_at<ComponentIndex, system_params>;
+
+			// TODO parent types
+
+			return !is_read_only<component>();
+		}
+
 		// Returns a tuple of array<int>'s, one for each system.
 		// The arrays hold the index to the previous system that used the type
-		static consteval auto build_dependency_matrix() {
+		static constexpr auto build_dependency_matrix() {
 			constexpr auto num_params = type_list_size<flattened_naked_types>;
-			std::array<int, num_params> last_index{-1};
+			std::array<int, num_params> last_index;
+			last_index.fill(-1);
 
-			// Iterate over all the parameter lists for each system
+			// Iterate over all the systems, getting each parameter list
 			return with_all_types<all_naked_types>([&last_index, index = 0]<typename... ParamLists>() mutable {
-				// Iterate over a systems parameters
+				// Iterate over the systems parameters
 				return std::tuple{
 					with_all_types<ParamLists>([&last_index, I = index++]<typename... Params>() {
 						// Get the last index where the types were used
@@ -153,23 +174,55 @@ namespace ecs::detail {
 			});
 		}
 
-		// Get a system graph
-		template<int SystemIndex>
-		static consteval auto build_pipeline() {
-			return pipeline{SystemIndex};
+		template <int I>
+		static constexpr auto find_pipeline() -> bs_pipeline {
+			if constexpr (I == -1)
+				return {0};
+			else {
+				constexpr auto arr_I = std::get<I>(dependency_matrix);
+
+				auto const this_pipe = bs_pipeline{1ull << I};
+				auto const dependent_pipes = ct_iseq<arr_I.size()>([&](auto... Is) {
+					return (... | (find_pipeline<arr_I[Is]>()));
+				});
+
+				return this_pipe | dependent_pipes;
+			}
 		}
 
-		// Returns true if the system component can be written to
-		template<int SystemIndex, int ComponentIndex>
-		static consteval bool writes_to_component() {
-			using system_params = typename type_at<SystemIndex, systems_info>::param_types;
-			using component = type_at<ComponentIndex, system_params>;
+		static constexpr auto build_pipelines_vec() {
+			int const num_deps = std::tuple_size_v<decltype(dependency_matrix)>;
 
-			// TODO parent types
+			std::vector<bs_pipeline> pipelines;
 
-			return !is_read_only<component>();
+			ct_loop(ct<0>, ct<num_deps>, [&](auto I) {
+				pipelines.push_back(find_pipeline<I>());
+			});
+
+			// Merge overlapping pipes
+			size_t index = 0;
+			while (index < pipelines.size()) {
+				for (size_t next = index + 1; next < pipelines.size();) {
+					if ((pipelines[index] & pipelines[next]).any()) {
+						pipelines[index] |= pipelines[next];
+						pipelines[next] = pipelines.back();
+						pipelines.pop_back();
+					} else {
+						next += 1;
+					}
+				}
+
+				index += 1;
+			}
+
+			return pipelines;
 		}
 
+		static constexpr auto build_pipelines() {
+			std::array<bs_pipeline, build_pipelines_vec().size()> arr_pipelines;
+			std::ranges::copy(build_pipelines_vec(), arr_pipelines.begin());
+			return arr_pipelines;
+		}
 	private:
 		// Holds all the component pools used by all the systems
 		all_pools pools;
@@ -178,5 +231,7 @@ namespace ecs::detail {
 		all_systems systems;
 
 		static constexpr auto dependency_matrix = build_dependency_matrix();
+
+		static constexpr auto pipelines = build_pipelines();
 	};
 } // namespace ecs

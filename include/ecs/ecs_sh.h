@@ -2545,6 +2545,11 @@ using reduce_parent_t =
 template <typename T>
 using naked_component_t = std::remove_pointer_t<std::remove_cvref_t<reduce_parent_t<T>>>;
 
+// Ensure that the passed type is naked, ie, it's
+// an 'int' and not an 'int*' or 'int const&'.
+template <typename T>
+concept naked_component = std::same_as<T, naked_component_t<T>>;
+
 // Alias for stored pools
 template <typename T>
 using pool = component_pool<naked_component_t<T>>* const;

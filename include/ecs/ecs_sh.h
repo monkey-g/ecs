@@ -418,7 +418,7 @@ namespace ecs::detail {
 		}
 
 		template <typename... Types, typename F>
-		constexpr decltype(auto) for_all_types(F&& f, type_list<Types...>*) {
+		constexpr decltype(auto) with_all_types(F&& f, type_list<Types...>*) {
 			return f.template operator()<Types...>();
 		}
 
@@ -693,11 +693,11 @@ namespace ecs::detail {
 		impl::for_specific_type_or<T>(f, nf, static_cast<TL*>(nullptr));
 	}
 
-	// Applies the functor F to all types in the type list.
+	// Applies the functor F once with all types in the type list.
 	// Takes lambdas of the form '[]<typename ...T>() {}'
 	template <impl::TypeList TL, typename F>
-	constexpr decltype(auto) for_all_types(F&& f) {
-		return impl::for_all_types(f, static_cast<TL*>(nullptr));
+	constexpr decltype(auto) with_all_types(F&& f) {
+		return impl::with_all_types(f, static_cast<TL*>(nullptr));
 	}
 
 	// Applies the bool-returning functor F to each type in the type list.
@@ -3148,27 +3148,27 @@ inline std::vector<entity_range> difference_ranges(entity_range_view view_a, ent
 namespace ecs::detail {
 
 // Given a list of components, return an array containing the corresponding component pools
-template <typename ComponentsList, typename PoolsList>
+template <typename ComponentsList>
 	requires(std::is_same_v<ComponentsList, transform_type<ComponentsList, naked_component_t>>)
-auto get_pool_iterators([[maybe_unused]] component_pools<PoolsList> const& pools) {
+auto get_pool_iterators([[maybe_unused]] auto const& pools) {
 	if constexpr (type_list_is_empty<ComponentsList>) {
 		return std::array<stride_view<0, char const>, 0>{};
 	} else {
 		// Verify that the component list passed has a corresponding pool
-		for_each_type<ComponentsList>([]<typename T>() {
-			static_assert(contains_type<T, PoolsList>(), "A component is missing its corresponding component pool");
-		});
+		//for_each_type<ComponentsList>([]<typename T>() {
+		//	static_assert(contains_type<T, PoolsList>(), "A component is missing its corresponding component pool");
+		//});
 
-		return for_all_types<ComponentsList>([&]<typename... Components>() {
-			return std::to_array({pools.template get<Components>().get_entities()...});
+		return with_all_types<ComponentsList>([&]<typename... Components>() {
+			return std::to_array({std::get<component_pool<Components>>(pools).get_entities()...});
 		});
 	}
 }
 
 
 // Find the intersection of the sets of entities in the specified pools
-template <typename InputList, typename PoolsList, typename F>
-void find_entity_pool_intersections_cb(component_pools<PoolsList> const& pools, F&& callback) {
+template <typename InputList, typename F>
+void find_entity_pool_intersections_cb(auto const& pools, F&& callback) {
 	static_assert(not type_list_is_empty<InputList>, "Empty component list supplied");
 
 	// Split the type_list into filters and non-filters (regular components).
